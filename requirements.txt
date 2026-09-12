@@ -1,0 +1,9 @@
+Flask
+gunicorn
+requests
+PyMuPDF
+python-docx
+chromadb
+sentence-transformers
+torch
+python-dotenv

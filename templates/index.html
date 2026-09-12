@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>RAGenius - AI Document Intelligence</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+
+    <link rel="preconnect"
+          href="https://fonts.googleapis.com">
+
+    <link rel="preconnect"
+          href="https://fonts.gstatic.com"
+          crossorigin>
+
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+          rel="stylesheet">
+
+</head>
+
+
+<body>
+
+<div class="app">
+
+
+    <!-- =====================================================
+         SIDEBAR
+    ====================================================== -->
+
+    <aside class="sidebar">
+
+        <!-- BRAND -->
+
+        <div class="brand">
+
+            <div class="brain-logo">
+
+                <svg viewBox="0 0 100 100">
+
+                    <defs>
+
+                        <linearGradient
+                            id="brainGradient"
+                            x1="0%"
+                            y1="0%"
+                            x2="100%"
+                            y2="100%">
+
+                            <stop offset="0%"
+                                  stop-color="#2563eb"/>
+
+                            <stop offset="50%"
+                                  stop-color="#4f46e5"/>
+
+                            <stop offset="100%"
+                                  stop-color="#7c3aed"/>
+
+                        </linearGradient>
+
+                    </defs>
+
+
+                    <path
+                        d="M50 15
+                           C35 8 20 18 23 32
+                           C10 35 10 52 22 57
+                           C15 72 27 85 40 81
+                           C46 94 58 94 63 82
+                           C78 87 90 73 82 60
+                           C94 52 89 35 77 32
+                           C80 18 65 8 50 15Z"
+                        fill="none"
+                        stroke="url(#brainGradient)"
+                        stroke-width="5"
+                        stroke-linecap="round"/>
+
+
+                    <path
+                        d="M50 18 V82"
+                        stroke="url(#brainGradient)"
+                        stroke-width="3"/>
+
+
+                    <g
+                        stroke="url(#brainGradient)"
+                        stroke-width="2">
+
+                        <line x1="35" y1="30"
+                              x2="50" y2="40"/>
+
+                        <line x1="25" y1="45"
+                              x2="38" y2="50"/>
+
+                        <line x1="38" y1="50"
+                              x2="43" y2="72"/>
+
+                        <line x1="30" y1="67"
+                              x2="43" y2="72"/>
+
+                        <line x1="65" y1="30"
+                              x2="50" y2="40"/>
+
+                        <line x1="75" y1="45"
+                              x2="62" y2="50"/>
+
+                        <line x1="62" y1="50"
+                              x2="57" y2="72"/>
+
+                        <line x1="70" y1="67"
+                              x2="57" y2="72"/>
+
+                    </g>
+
+
+                    <g fill="url(#brainGradient)">
+
+                        <circle cx="35" cy="30" r="4"/>
+                        <circle cx="25" cy="45" r="4"/>
+                        <circle cx="38" cy="50" r="4"/>
+                        <circle cx="30" cy="67" r="4"/>
+                        <circle cx="43" cy="72" r="4"/>
+
+                        <circle cx="65" cy="30" r="4"/>
+                        <circle cx="75" cy="45" r="4"/>
+                        <circle cx="62" cy="50" r="4"/>
+                        <circle cx="70" cy="67" r="4"/>
+                        <circle cx="57" cy="72" r="4"/>
+
+                    </g>
+
+                </svg>
+
+            </div>
+
+
+            <div class="brand-text">
+
+                <h1>
+                    <span>RAG</span><strong>enius</strong>
+                </h1>
+
+                <p>AI DOCUMENT INTELLIGENCE</p>
+
+            </div>
+
+        </div>
+
+
+        <!-- NEW CONVERSATION -->
+
+        <button class="new-chat-btn"
+                onclick="newConversation()">
+
+            <span class="plus">+</span>
+
+            <span>New Conversation</span>
+
+        </button>
+
+
+        <!-- DOCUMENTS -->
+
+        <div class="documents-section">
+
+            <div class="section-title">
+
+                <span>MY DOCUMENTS</span>
+
+                <span class="document-count"
+                      id="documentCount">
+
+                    0
+
+                </span>
+
+            </div>
+
+
+            <div class="empty-documents"
+                 id="emptyDocuments">
+
+                <div class="document-icon">
+
+                    <svg viewBox="0 0 64 64">
+
+                        <path
+                            d="M16 7h23l12 12v38H16z"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="3"/>
+
+                        <path
+                            d="M39 7v13h12"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="3"/>
+
+                        <line x1="25"
+                              y1="32"
+                              x2="43"
+                              y2="32"
+                              stroke="currentColor"
+                              stroke-width="3"/>
+
+                        <line x1="25"
+                              y1="40"
+                              x2="43"
+                              y2="40"
+                              stroke="currentColor"
+                              stroke-width="3"/>
+
+                        <line x1="25"
+                              y1="48"
+                              x2="37"
+                              y2="48"
+                              stroke="currentColor"
+                              stroke-width="3"/>
+
+                    </svg>
+
+                </div>
+
+
+                <h3>No documents yet</h3>
+
+                <p>Upload a document to begin</p>
+
+            </div>
+
+
+            <div id="documentList"
+                 class="document-list">
+            </div>
+
+        </div>
+
+
+        <!-- UPLOAD -->
+
+        <button class="upload-sidebar-btn"
+                onclick="openFilePicker()">
+
+            <div class="upload-small-icon">
+                ↑
+            </div>
+
+            <div>
+
+                <strong>Upload Documents</strong>
+
+                <span>PDF or DOCX</span>
+
+            </div>
+
+        </button>
+
+
+        <!-- MENU -->
+
+        <div class="sidebar-menu">
+
+            <button class="menu-item"
+                    onclick="showSettings()">
+
+                <span class="menu-icon">⚙</span>
+
+                <span>Settings</span>
+
+            </button>
+
+
+            <button class="menu-item"
+                    onclick="showHelp()">
+
+                <span class="menu-icon">?</span>
+
+                <span>Help & Support</span>
+
+            </button>
+
+        </div>
+
+
+        <!-- SYSTEM -->
+
+        <div class="system-card">
+
+            <div>
+
+                <div class="system-title">
+
+                    <span class="status-dot"></span>
+
+                    System Ready
+
+                </div>
+
+                <p>All systems operational</p>
+
+            </div>
+
+            <div class="wave">
+                〰⌁〰
+            </div>
+
+        </div>
+
+    </aside>
+
+
+
+    <!-- =====================================================
+         MAIN
+    ====================================================== -->
+
+    <main class="main">
+
+
+        <!-- HEADER -->
+
+        <header class="top-header">
+
+            <div>
+
+                <h2>RAGenius</h2>
+
+                <p>
+                    AI-powered document intelligence
+                </p>
+
+            </div>
+
+
+            <div class="header-actions">
+
+                <div class="engine-status">
+
+                    <span class="status-dot"></span>
+
+                    RAG ENGINE ONLINE
+
+                </div>
+
+            </div>
+
+        </header>
+
+
+
+        <!-- CONTENT -->
+
+        <section class="content">
+
+            <div class="dashboard">
+
+
+                <!-- =================================================
+                     HERO
+                ================================================== -->
+
+                <div class="welcome-card">
+
+
+                    <div class="welcome-content">
+
+                        <div class="eyebrow">
+
+                            ✦ DOCUMENT INTELLIGENCE
+
+                        </div>
+
+
+                        <h1>
+
+                            Ask questions,<br>
+
+                            <span>
+                                get accurate answers.
+                            </span>
+
+                        </h1>
+
+
+                        <p>
+
+                            Upload your PDF or DOCX documents,
+                            retrieve important information,
+                            and ask questions using AI-powered
+                            document understanding.
+
+                        </p>
+
+
+                        <div class="welcome-buttons">
+
+                            <button
+                                class="primary-btn"
+                                onclick="openFilePicker()">
+
+                                ↑
+
+                                Upload Document
+
+                            </button>
+
+
+                            <button
+                                class="secondary-btn"
+                                onclick="openFilePicker()">
+
+                                + Add Document
+
+                            </button>
+
+                        </div>
+
+                    </div>
+
+
+                    <!-- HERO VISUAL -->
+
+                    <div class="dashboard-visual">
+
+                        <div class="visual-circle circle-one"></div>
+
+                        <div class="visual-circle circle-two"></div>
+
+
+                        <div class="floating-card card-pdf">
+
+                            <div class="file-icon pdf">
+                                PDF
+                            </div>
+
+                            <div>
+
+                                <strong>
+                                    PDF Document
+                                </strong>
+
+                                <small>
+                                    Ready to analyze
+                                </small>
+
+                            </div>
+
+                        </div>
+
+
+                        <div class="floating-card card-docx">
+
+                            <div class="file-icon docx">
+                                DOCX
+                            </div>
+
+                            <div>
+
+                                <strong>
+                                    Word Document
+                                </strong>
+
+                                <small>
+                                    AI readable
+                                </small>
+
+                            </div>
+
+                        </div>
+
+
+                        <div class="big-brain">
+
+                            <svg viewBox="0 0 100 100">
+
+                                <defs>
+
+                                    <linearGradient
+                                        id="heroBrainGradient"
+                                        x1="0%"
+                                        y1="0%"
+                                        x2="100%"
+                                        y2="100%">
+
+                                        <stop offset="0%"
+                                              stop-color="#2563eb"/>
+
+                                        <stop offset="50%"
+                                              stop-color="#4f46e5"/>
+
+                                        <stop offset="100%"
+                                              stop-color="#7c3aed"/>
+
+                                    </linearGradient>
+
+                                </defs>
+
+
+                                <path
+                                    d="M50 15
+                                       C35 8 20 18 23 32
+                                       C10 35 10 52 22 57
+                                       C15 72 27 85 40 81
+                                       C46 94 58 94 63 82
+                                       C78 87 90 73 82 60
+                                       C94 52 89 35 77 32
+                                       C80 18 65 8 50 15Z"
+                                    fill="none"
+                                    stroke="url(#heroBrainGradient)"
+                                    stroke-width="5"
+                                    stroke-linecap="round"/>
+
+
+                                <path
+                                    d="M50 18 V82"
+                                    stroke="url(#heroBrainGradient)"
+                                    stroke-width="3"/>
+
+
+                                <g
+                                    stroke="url(#heroBrainGradient)"
+                                    stroke-width="2">
+
+                                    <line x1="35" y1="30"
+                                          x2="50" y2="40"/>
+
+                                    <line x1="25" y1="45"
+                                          x2="38" y2="50"/>
+
+                                    <line x1="38" y1="50"
+                                          x2="43" y2="72"/>
+
+                                    <line x1="65" y1="30"
+                                          x2="50" y2="40"/>
+
+                                    <line x1="75" y1="45"
+                                          x2="62" y2="50"/>
+
+                                    <line x1="62" y1="50"
+                                          x2="57" y2="72"/>
+
+                                </g>
+
+
+                                <g fill="url(#heroBrainGradient)">
+
+                                    <circle cx="35" cy="30" r="4"/>
+                                    <circle cx="25" cy="45" r="4"/>
+                                    <circle cx="38" cy="50" r="4"/>
+                                    <circle cx="43" cy="72" r="4"/>
+
+                                    <circle cx="65" cy="30" r="4"/>
+                                    <circle cx="75" cy="45" r="4"/>
+                                    <circle cx="62" cy="50" r="4"/>
+                                    <circle cx="57" cy="72" r="4"/>
+
+                                </g>
+
+                            </svg>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+
+
+                <!-- =================================================
+                     FEATURE CARDS
+                ================================================== -->
+
+                <div class="feature-grid">
+
+
+                    <div class="feature-card">
+
+                        <div class="feature-icon">
+                            ↑
+                        </div>
+
+                        <div>
+
+                            <h3>
+                                Upload Documents
+                            </h3>
+
+                            <p>
+                                PDF and DOCX supported
+                            </p>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="feature-card">
+
+                        <div class="feature-icon">
+                            ✦
+                        </div>
+
+                        <div>
+
+                            <h3>
+                                Smart Retrieval
+                            </h3>
+
+                            <p>
+                                Find relevant information
+                            </p>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="feature-card">
+
+                        <div class="feature-icon">
+                            ?
+                        </div>
+
+                        <div>
+
+                            <h3>
+                                Ask Questions
+                            </h3>
+
+                            <p>
+                                Get answers from documents
+                            </p>
+
+                        </div>
+
+                    </div>
+
+
+                </div>
+
+
+
+                <!-- =================================================
+                     CHAT DASHBOARD
+                ================================================== -->
+
+                <div class="dashboard-card chat-dashboard">
+
+
+                    <!-- CHAT HEADER -->
+
+                    <div class="card-header">
+
+                        <div class="chat-heading">
+
+                            <div class="chat-heading-icon">
+
+                                <svg viewBox="0 0 100 100">
+
+                                    <defs>
+
+                                        <linearGradient
+                                            id="chatHeaderGradient"
+                                            x1="0%"
+                                            y1="0%"
+                                            x2="100%"
+                                            y2="100%">
+
+                                            <stop offset="0%"
+                                                  stop-color="#2563eb"/>
+
+                                            <stop offset="100%"
+                                                  stop-color="#7c3aed"/>
+
+                                        </linearGradient>
+
+                                    </defs>
+
+
+                                    <path
+                                        d="M20 45
+                                           C20 25 35 15 50 15
+                                           C70 15 82 28 82 47
+                                           C82 67 68 79 50 79
+                                           C44 79 39 78 34 75
+                                           L22 82
+                                           L25 68
+                                           C21 62 20 54 20 45Z"
+                                        fill="none"
+                                        stroke="url(#chatHeaderGradient)"
+                                        stroke-width="6"
+                                        stroke-linecap="round"/>
+
+
+                                    <circle cx="38"
+                                            cy="47"
+                                            r="4"
+                                            fill="#4f46e5"/>
+
+                                    <circle cx="50"
+                                            cy="47"
+                                            r="4"
+                                            fill="#4f46e5"/>
+
+                                    <circle cx="62"
+                                            cy="47"
+                                            r="4"
+                                            fill="#4f46e5"/>
+
+                                </svg>
+
+                            </div>
+
+
+                            <div>
+
+                                <h2>
+                                    Chat with your Documents
+                                </h2>
+
+                                <p>
+                                    Ask anything about your uploaded files
+                                </p>
+
+                            </div>
+
+                        </div>
+
+
+                        <span class="chat-online">
+
+                            <span class="ready-dot"></span>
+
+                            Ready
+
+                        </span>
+
+                    </div>
+
+
+
+                    <!-- CHAT BODY -->
+
+                    <div class="chat-area">
+
+
+                        <!-- WELCOME -->
+
+                        <div id="chatWelcome"
+                             class="chat-welcome">
+
+
+                            <!-- SMALL BRAIN LOGO -->
+
+                            <div class="chat-brain">
+
+                                <svg viewBox="0 0 100 100">
+
+                                    <defs>
+
+                                        <linearGradient
+                                            id="chatBrainGradient"
+                                            x1="0%"
+                                            y1="0%"
+                                            x2="100%"
+                                            y2="100%">
+
+                                            <stop offset="0%"
+                                                  stop-color="#2563eb"/>
+
+                                            <stop offset="50%"
+                                                  stop-color="#4f46e5"/>
+
+                                            <stop offset="100%"
+                                                  stop-color="#7c3aed"/>
+
+                                        </linearGradient>
+
+                                    </defs>
+
+
+                                    <path
+                                        d="M50 15
+                                           C35 8 20 18 23 32
+                                           C10 35 10 52 22 57
+                                           C15 72 27 85 40 81
+                                           C46 94 58 94 63 82
+                                           C78 87 90 73 82 60
+                                           C94 52 89 35 77 32
+                                           C80 18 65 8 50 15Z"
+                                        fill="none"
+                                        stroke="url(#chatBrainGradient)"
+                                        stroke-width="5"
+                                        stroke-linecap="round"/>
+
+
+                                    <path
+                                        d="M50 18 V82"
+                                        stroke="url(#chatBrainGradient)"
+                                        stroke-width="3"/>
+
+
+                                    <g
+                                        stroke="url(#chatBrainGradient)"
+                                        stroke-width="2">
+
+                                        <line x1="35" y1="30"
+                                              x2="50" y2="40"/>
+
+                                        <line x1="25" y1="45"
+                                              x2="38" y2="50"/>
+
+                                        <line x1="38" y1="50"
+                                              x2="43" y2="72"/>
+
+                                        <line x1="65" y1="30"
+                                              x2="50" y2="40"/>
+
+                                        <line x1="75" y1="45"
+                                              x2="62" y2="50"/>
+
+                                        <line x1="62" y1="50"
+                                              x2="57" y2="72"/>
+
+                                    </g>
+
+
+                                    <g fill="url(#chatBrainGradient)">
+
+                                        <circle cx="35" cy="30" r="4"/>
+                                        <circle cx="25" cy="45" r="4"/>
+                                        <circle cx="38" cy="50" r="4"/>
+                                        <circle cx="43" cy="72" r="4"/>
+
+                                        <circle cx="65" cy="30" r="4"/>
+                                        <circle cx="75" cy="45" r="4"/>
+                                        <circle cx="62" cy="50" r="4"/>
+                                        <circle cx="57" cy="72" r="4"/>
+
+                                    </g>
+
+                                </svg>
+
+                            </div>
+
+
+                            <h3>
+                                Your document assistant is ready
+                            </h3>
+
+
+                            <p>
+                                Upload a document and ask a question
+                                to get started.
+                            </p>
+
+                        </div>
+
+
+
+                        <!-- QUESTIONS + ANSWERS -->
+
+                        <div id="chatMessages"
+                             class="chat-messages">
+                        </div>
+
+
+
+                        <!-- INPUT -->
+
+                        <div class="chat-input-wrapper">
+
+
+                            <button
+                                class="attachment-btn"
+                                onclick="openFilePicker()"
+                                title="Upload document">
+
+                                📎
+
+                            </button>
+
+
+                            <input
+                                type="text"
+                                id="questionInput"
+                                placeholder="Ask anything about your documents..."
+                                autocomplete="off">
+
+
+                            <button
+                                class="send-btn"
+                                onclick="sendQuestion()"
+                                title="Send">
+
+                                ↑
+
+                            </button>
+
+                        </div>
+
+
+                        <div class="chat-info">
+
+                            <span>
+                                🔒 Documents stay private
+                            </span>
+
+                            <span>
+                                Press Enter to send
+                            </span>
+
+                        </div>
+
+
+                    </div>
+
+                </div>
+
+
+
+                <!-- HIDDEN UPLOAD FORM -->
+
+                <form id="uploadForm"
+                      action="/upload"
+                      method="POST"
+                      enctype="multipart/form-data">
+
+                    <input
+                        type="file"
+                        id="fileInput"
+                        name="file"
+                        accept=".pdf,.docx"
+                        hidden>
+
+                </form>
+
+
+            </div>
+
+        </section>
+
+
+
+        <!-- FOOTER -->
+
+        <footer class="footer">
+
+            <div>
+
+                <span class="status-dot"></span>
+
+                System ready
+
+            </div>
+
+
+            <div>
+
+                Documents:
+
+                <span id="footerDocumentCount">
+                    0
+                </span>
+
+            </div>
+
+
+            <div>
+
+                Supported:
+
+                <strong>
+                    PDF • DOCX
+                </strong>
+
+            </div>
+
+
+            <div>
+                RAG powered ✦
+            </div>
+
+        </footer>
+
+
+    </main>
+
+</div>
+
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+
+</body>
+
+</html>

@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>RAGenius - AI Document Intelligence</title>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f6f9ff;
+            color: #172554;
+            min-height: 100vh;
+        }
+
+        /* =========================
+           NAVBAR
+        ========================= */
+
+        .navbar {
+            height: 76px;
+            padding: 0 7%;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            background: #ffffff;
+            border-bottom: 1px solid #e5eaf2;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+        }
+
+        .brand-logo {
+            width: 42px;
+            height: 42px;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            border-radius: 12px;
+
+            background: linear-gradient(
+                135deg,
+                #2563eb,
+                #4f46e5
+            );
+
+            color: white;
+            font-size: 22px;
+            font-weight: bold;
+
+            box-shadow:
+                0 7px 18px
+                rgba(37, 99, 235, 0.20);
+        }
+
+        .brand-name {
+            font-size: 21px;
+            font-weight: 800;
+            color: #172554;
+        }
+
+        .brand-name span {
+            color: #2563eb;
+        }
+
+        .nav-button {
+            padding: 11px 20px;
+
+            border: 1px solid #d6e1f2;
+            border-radius: 10px;
+
+            background: #ffffff;
+            color: #31527f;
+
+            font-size: 13px;
+            font-weight: 700;
+
+            cursor: pointer;
+        }
+
+        /* =========================
+           HERO
+        ========================= */
+
+        .hero {
+            width: 90%;
+            max-width: 1180px;
+
+            min-height: calc(100vh - 76px);
+
+            margin: 0 auto;
+
+            display: grid;
+            grid-template-columns: 1.05fr 0.95fr;
+            align-items: center;
+
+            gap: 70px;
+        }
+
+        .hero-content {
+            padding: 40px 0;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+
+            padding: 8px 13px;
+
+            border-radius: 30px;
+
+            background: #eef5ff;
+            border: 1px solid #d6e7ff;
+
+            color: #2563eb;
+
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .badge-dot {
+            width: 7px;
+            height: 7px;
+
+            border-radius: 50%;
+            background: #22c55e;
+        }
+
+        h1 {
+            margin-top: 23px;
+
+            font-size: 54px;
+            line-height: 1.08;
+
+            letter-spacing: -1.8px;
+
+            color: #172554;
+        }
+
+        h1 span {
+            color: #2563eb;
+        }
+
+        .description {
+            max-width: 590px;
+
+            margin-top: 22px;
+
+            color: #64748b;
+
+            font-size: 17px;
+            line-height: 1.7;
+        }
+
+        .buttons {
+            display: flex;
+            gap: 13px;
+
+            margin-top: 30px;
+        }
+
+        .get-started {
+            padding: 15px 25px;
+
+            border: none;
+            border-radius: 11px;
+
+            background: linear-gradient(
+                135deg,
+                #2563eb,
+                #4f46e5
+            );
+
+            color: white;
+
+            font-size: 14px;
+            font-weight: 800;
+
+            cursor: pointer;
+
+            text-decoration: none;
+
+            box-shadow:
+                0 10px 24px
+                rgba(37, 99, 235, 0.20);
+
+            transition: 0.2s ease;
+        }
+
+        .get-started:hover {
+            transform: translateY(-2px);
+        }
+
+        .learn-more {
+            padding: 15px 25px;
+
+            border: 1px solid #d6e1f2;
+            border-radius: 11px;
+
+            background: white;
+            color: #31527f;
+
+            font-size: 14px;
+            font-weight: 700;
+
+            cursor: pointer;
+        }
+
+        /* =========================
+           FEATURES
+        ========================= */
+
+        .features {
+            display: flex;
+            gap: 28px;
+
+            margin-top: 36px;
+        }
+
+        .feature {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+
+            color: #64748b;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .check {
+            width: 22px;
+            height: 22px;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            border-radius: 50%;
+
+            background: #eaf8f0;
+            color: #16a34a;
+
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        /* =========================
+           VISUAL
+        ========================= */
+
+        .hero-visual {
+            position: relative;
+
+            height: 470px;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .circle {
+            position: absolute;
+
+            border-radius: 50%;
+
+            border: 1px solid #d7e7ff;
+        }
+
+        .circle.one {
+            width: 390px;
+            height: 390px;
+
+            background: rgba(
+                219,
+                234,
+                254,
+                0.40
+            );
+        }
+
+        .circle.two {
+            width: 285px;
+            height: 285px;
+
+            background: rgba(
+                239,
+                246,
+                255,
+                0.80
+            );
+        }
+
+        .brain-card {
+            position: relative;
+            z-index: 3;
+
+            width: 170px;
+            height: 170px;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            border-radius: 38px;
+
+            background: #ffffff;
+
+            box-shadow:
+                0 25px 60px
+                rgba(37, 99, 235, 0.15);
+        }
+
+        .brain {
+            font-size: 76px;
+        }
+
+        /* =========================
+           FLOATING CARDS
+        ========================= */
+
+        .document-card {
+            position: absolute;
+            z-index: 5;
+
+            display: flex;
+            align-items: center;
+            gap: 11px;
+
+            padding: 13px 16px;
+
+            background: white;
+
+            border: 1px solid #dce6f3;
+            border-radius: 13px;
+
+            box-shadow:
+                0 12px 30px
+                rgba(30, 64, 175, 0.10);
+        }
+
+        .document-card.pdf {
+            top: 65px;
+            left: 10px;
+
+            transform: rotate(-5deg);
+        }
+
+        .document-card.docx {
+            right: 5px;
+            bottom: 65px;
+
+            transform: rotate(5deg);
+        }
+
+        .file-icon {
+            width: 39px;
+            height: 43px;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            border-radius: 7px;
+
+            color: white;
+
+            font-size: 9px;
+            font-weight: 800;
+        }
+
+        .pdf .file-icon {
+            background: #ef4444;
+        }
+
+        .docx .file-icon {
+            background: #2563eb;
+        }
+
+        .document-card strong {
+            display: block;
+
+            color: #263b60;
+
+            font-size: 11px;
+        }
+
+        .document-card small {
+            display: block;
+
+            margin-top: 4px;
+
+            color: #91a4be;
+
+            font-size: 9px;
+        }
+
+        /* =========================
+           BOTTOM TEXT
+        ========================= */
+
+        .bottom-text {
+            margin-top: 28px;
+
+            color: #94a3b8;
+
+            font-size: 11px;
+        }
+
+        /* =========================
+           RESPONSIVE
+        ========================= */
+
+        @media (max-width: 900px) {
+
+            .hero {
+                grid-template-columns: 1fr;
+                gap: 20px;
+
+                padding-top: 40px;
+                padding-bottom: 50px;
+            }
+
+            .hero-content {
+                text-align: center;
+            }
+
+            .description {
+                margin-left: auto;
+                margin-right: auto;
+            }
+
+            .buttons,
+            .features {
+                justify-content: center;
+            }
+
+            .hero-visual {
+                height: 400px;
+            }
+
+            h1 {
+                font-size: 42px;
+            }
+        }
+
+        @media (max-width: 600px) {
+
+            .navbar {
+                padding: 0 20px;
+            }
+
+            .hero {
+                width: 92%;
+            }
+
+            h1 {
+                font-size: 36px;
+            }
+
+            .description {
+                font-size: 15px;
+            }
+
+            .features {
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .circle.one {
+                width: 300px;
+                height: 300px;
+            }
+
+            .circle.two {
+                width: 220px;
+                height: 220px;
+            }
+
+            .brain-card {
+                width: 135px;
+                height: 135px;
+            }
+
+            .brain {
+                font-size: 60px;
+            }
+
+            .document-card {
+                transform: scale(0.85) !important;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- =========================
+         NAVBAR
+    ========================= -->
+
+    <nav class="navbar">
+
+        <div class="brand">
+
+            <div class="brand-logo">
+                🧠
+            </div>
+
+            <div class="brand-name">
+                RAG<span>enius</span>
+            </div>
+
+        </div>
+
+        <button
+            class="nav-button"
+            onclick="goToDashboard()"
+        >
+            Open Dashboard
+        </button>
+
+    </nav>
+
+
+    <!-- =========================
+         HERO
+    ========================= -->
+
+    <main class="hero">
+
+        <section class="hero-content">
+
+            <div class="badge">
+                <span class="badge-dot"></span>
+                AI-Powered Document Intelligence
+            </div>
+
+            <h1>
+                Chat with your
+                <span>Documents.</span>
+            </h1>
+
+            <p class="description">
+                Upload your PDF or DOCX files and ask questions
+                in simple language. RAGenius finds the relevant
+                information from your document and gives you
+                clear answers.
+            </p>
+
+
+            <div class="buttons">
+
+                <!-- THIS GOES DIRECTLY TO DASHBOARD -->
+                <a
+                    href="/dashboard"
+                    class="get-started"
+                >
+                    Get Started Free →
+                </a>
+
+                <button
+                    class="learn-more"
+                    onclick="scrollToFeatures()"
+                >
+                    Learn More
+                </button>
+
+            </div>
+
+
+            <div class="features">
+
+                <div class="feature">
+                    <span class="check">✓</span>
+                    PDF & DOCX Support
+                </div>
+
+                <div class="feature">
+                    <span class="check">✓</span>
+                    Ask Questions
+                </div>
+
+                <div class="feature">
+                    <span class="check">✓</span>
+                    AI-Powered Answers
+                </div>
+
+            </div>
+
+
+            <p class="bottom-text">
+                No account required • Start using RAGenius instantly
+            </p>
+
+        </section>
+
+
+        <!-- =========================
+             VISUAL
+        ========================= -->
+
+        <section
+            class="hero-visual"
+            id="features"
+        >
+
+            <div class="circle one"></div>
+            <div class="circle two"></div>
+
+
+            <div class="document-card pdf">
+
+                <div class="file-icon">
+                    PDF
+                </div>
+
+                <div>
+                    <strong>Document.pdf</strong>
+                    <small>Ready to analyze</small>
+                </div>
+
+            </div>
+
+
+            <div class="brain-card">
+
+                <div class="brain">
+                    🧠
+                </div>
+
+            </div>
+
+
+            <div class="document-card docx">
+
+                <div class="file-icon">
+                    DOCX
+                </div>
+
+                <div>
+                    <strong>Notes.docx</strong>
+                    <small>AI can understand</small>
+                </div>
+
+            </div>
+
+        </section>
+
+    </main>
+
+
+    <script>
+
+        function goToDashboard() {
+            window.location.href = "/dashboard";
+        }
+
+        function scrollToFeatures() {
+            document.getElementById("features")
+                .scrollIntoView({
+                    behavior: "smooth"
+                });
+        }
+
+    </script>
+
+</body>
+</html>
