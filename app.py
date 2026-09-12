@@ -5,7 +5,6 @@ import shutil
 import requests
 
 from dotenv import load_dotenv
-
 from flask import (
     Flask,
     render_template,
@@ -17,6 +16,7 @@ from flask import (
 
 import pymupdf
 from docx import Document
+
 import chromadb
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
@@ -34,26 +34,22 @@ load_dotenv()
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = "uploads"
-CHROMA_FOLDER = "chroma_db"
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(CHROMA_FOLDER, exist_ok=True)
-
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+CHROMA_FOLDER = os.path.join(BASE_DIR, "chroma_db")
+
 MAX_FILE_SIZE = 10 * 1024 * 1024
 
-MAX_RESULTS = 30
+MAX_RESULTS = 10
 MAX_CONTEXT_CHUNKS = 4
 
-ALLOWED_EXTENSIONS = {
-    "pdf",
-    "docx"
-}
+ALLOWED_EXTENSIONS = {"pdf", "docx"}
 
 NO_ANSWER = (
     "I couldn't find this information in the currently uploaded document."
@@ -74,69 +70,110 @@ OLLAMA_MODEL = os.getenv(
     "gpt-oss:120b"
 )
 
-OLLAMA_API_KEY = os.getenv(
-    "OLLAMA_API_KEY"
-)
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 
 
 # ============================================================
-# CHROMA DATABASE
+# CREATE REQUIRED FOLDERS
 # ============================================================
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(CHROMA_FOLDER, exist_ok=True)
+
+
+# ============================================================
+# CHROMA DATABASE - LAZY LOADING
+# ============================================================
+
+# Important for Render Free:
+# Do NOT load the embedding model while the server is starting.
+# Load it only when a document actually needs to be processed.
 
 chroma_client = chromadb.PersistentClient(
     path=CHROMA_FOLDER
 )
 
-# Lightweight ONNX-based embedding function.
-# This avoids loading PyTorch + SentenceTransformer.
-embedding_function = DefaultEmbeddingFunction()
+embedding_function = None
+collection = None
+
+
+def get_embedding_function():
+    """
+    Load Chroma's default embedding function only when needed.
+    """
+
+    global embedding_function
+
+    if embedding_function is None:
+        print("Loading embedding function...")
+
+        embedding_function = DefaultEmbeddingFunction()
+
+        print("Embedding function loaded.")
+
+    return embedding_function
 
 
 def get_collection():
     """
-    Get the existing current_document collection.
-
-    The collection is NOT deleted when Flask starts.
+    Get the current Chroma collection.
+    Creates it if it does not exist.
     """
 
+    global collection
+
+    if collection is not None:
+        return collection
+
+    ef = get_embedding_function()
+
     try:
-        return chroma_client.get_collection(
+        collection = chroma_client.get_collection(
             name="current_document",
-            embedding_function=embedding_function
+            embedding_function=ef
         )
+
+        print("Existing Chroma collection loaded.")
 
     except Exception:
 
-        return chroma_client.create_collection(
+        collection = chroma_client.create_collection(
             name="current_document",
             metadata={
                 "hnsw:space": "cosine"
             },
-            embedding_function=embedding_function
+            embedding_function=ef
         )
 
+        print("New Chroma collection created.")
 
-collection = get_collection()
+    return collection
 
 
 # ============================================================
-# BASIC HELPERS
+# FILE HELPERS
 # ============================================================
 
 def allowed_file(filename):
+    """
+    Check whether uploaded file is PDF or DOCX.
+    """
 
-    if not filename:
-        return False
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower()
+        in ALLOWED_EXTENSIONS
+    )
 
-    if "." not in filename:
-        return False
 
-    extension = filename.rsplit(".", 1)[1].lower()
-
-    return extension in ALLOWED_EXTENSIONS
-
+# ============================================================
+# TEXT CLEANING
+# ============================================================
 
 def clean_text(text):
+    """
+    Clean extracted document text.
+    """
 
     if not text:
         return ""
@@ -150,7 +187,7 @@ def clean_text(text):
     )
 
     text = re.sub(
-        r"\n{3,}",
+        r"\n\s*\n\s*\n+",
         "\n\n",
         text
     )
@@ -163,39 +200,32 @@ def clean_text(text):
 # ============================================================
 
 def extract_pdf(file_path):
+    """
+    Extract text from PDF page by page.
+    """
 
     pages = []
 
     try:
-
         pdf = pymupdf.open(file_path)
 
-        for page_number, page in enumerate(
-            pdf,
-            start=1
-        ):
+        for page_number, page in enumerate(pdf, start=1):
 
             text = page.get_text("text")
 
             text = clean_text(text)
 
             if text:
-
                 pages.append({
-                    "text": text,
-                    "page": page_number
+                    "page": page_number,
+                    "text": text
                 })
 
         pdf.close()
 
     except Exception as e:
-
-        print(
-            "PDF extraction error:",
-            e
-        )
-
-        return []
+        print("PDF extraction error:", e)
+        raise
 
     return pages
 
@@ -205,66 +235,58 @@ def extract_pdf(file_path):
 # ============================================================
 
 def extract_docx(file_path):
+    """
+    Extract paragraphs and tables from DOCX.
+    """
 
-    pages = []
+    document = Document(file_path)
 
-    try:
+    parts = []
 
-        document = Document(file_path)
+    # --------------------------------------------------------
+    # Paragraphs
+    # --------------------------------------------------------
 
-        content = []
+    for paragraph in document.paragraphs:
 
-        # Paragraphs
-        for paragraph in document.paragraphs:
+        text = clean_text(paragraph.text)
 
-            text = clean_text(
-                paragraph.text
-            )
+        if text:
+            parts.append(text)
 
-            if text:
-                content.append(text)
+    # --------------------------------------------------------
+    # Tables
+    # --------------------------------------------------------
 
-        # Tables
-        for table in document.tables:
+    for table in document.tables:
 
-            for row in table.rows:
+        for row in table.rows:
 
-                cells = []
+            cells = []
 
-                for cell in row.cells:
+            for cell in row.cells:
 
-                    cell_text = clean_text(
-                        cell.text
-                    )
+                cell_text = clean_text(cell.text)
 
-                    if cell_text:
-                        cells.append(cell_text)
+                if cell_text:
+                    cells.append(cell_text)
 
-                if cells:
+            if cells:
+                parts.append(" | ".join(cells))
 
-                    content.append(
-                        " | ".join(cells)
-                    )
+    full_text = "\n".join(parts)
 
-        full_text = "\n".join(content)
+    full_text = clean_text(full_text)
 
-        if full_text.strip():
-
-            pages.append({
-                "text": full_text,
-                "page": 0
-            })
-
-    except Exception as e:
-
-        print(
-            "DOCX extraction error:",
-            e
-        )
-
+    if not full_text:
         return []
 
-    return pages
+    return [
+        {
+            "page": 0,
+            "text": full_text
+        }
+    ]
 
 
 # ============================================================
@@ -272,59 +294,52 @@ def extract_docx(file_path):
 # ============================================================
 
 def extract_document(file_path):
+    """
+    Extract text according to file type.
+    """
 
-    extension = file_path.rsplit(
-        ".",
-        1
-    )[1].lower()
+    extension = file_path.rsplit(".", 1)[1].lower()
 
     if extension == "pdf":
-
-        return extract_pdf(
-            file_path
-        )
+        return extract_pdf(file_path)
 
     if extension == "docx":
+        return extract_docx(file_path)
 
-        return extract_docx(
-            file_path
-        )
-
-    return []
+    raise ValueError("Unsupported file type.")
 
 
 # ============================================================
 # HEADING DETECTION
 # ============================================================
 
-HEADING_KEYWORDS = {
-
+HEADING_KEYWORDS = [
     "introduction",
     "definition",
     "overview",
-    "importance",
+    "background",
+    "objectives",
+    "objective",
     "scope",
+    "importance",
     "applications",
     "advantages",
     "disadvantages",
     "limitations",
     "conclusion",
+    "future scope",
+    "summary",
+    "classification",
     "architecture",
-    "methodology",
     "components",
+    "types",
+    "characteristics",
     "features",
     "functions",
-    "types",
-    "classification",
-    "characteristics",
+    "main functions",
     "working",
-    "working principle",
-    "objectives",
-    "benefits",
-    "challenges",
-    "future scope",
-    "future work",
-
+    "methodology",
+    "system architecture",
     "parallel hardware",
     "parallel software",
     "distributed memory",
@@ -332,23 +347,21 @@ HEADING_KEYWORDS = {
     "vector processors",
     "graphics processing units",
     "mimd systems",
-    "simd systems",
-
-    "m2m gateway",
-    "gateway functions",
-
-    "software defined networking",
-    "software-defined networking"
-}
+    "simd systems"
+]
 
 
 def normalize_for_comparison(text):
+    """
+    Normalize text for heading comparison.
+    """
 
     text = text.lower()
 
-    text = text.replace(
-        "software-defined",
-        "software defined"
+    text = re.sub(
+        r"^\s*\d+(?:\.\d+)*[\s\.\-:]*",
+        "",
+        text
     )
 
     text = re.sub(
@@ -366,81 +379,57 @@ def normalize_for_comparison(text):
     return text.strip()
 
 
-def is_heading(line):
+def is_heading(text):
+    """
+    Try to identify document headings.
+    """
 
-    line = line.strip()
-
-    if not line:
+    if not text:
         return False
 
-    if len(line) > 120:
+    text = text.strip()
+
+    if len(text) > 160:
         return False
 
-    normalized = normalize_for_comparison(
-        line
-    )
+    normalized = normalize_for_comparison(text)
 
-    # Numbered headings
-    # Examples:
-    # 1. Introduction
-    # 2.3 Architecture
+    if not normalized:
+        return False
+
+    # Numbered headings such as:
     # 2.6 Main gateway functions
-
+    # 3 Scope
     if re.match(
-        r"^\d+(?:\.\d+)*\s+[A-Za-z]",
-        line
+        r"^\s*\d+(?:\.\d+)*[\s\.\-:]",
+        text
     ):
-
         return True
 
-    # Examples:
-    # 1) Introduction
-    # 2- Architecture
-
-    if re.match(
-        r"^\d+[\)\-]\s+[A-Za-z]",
-        line
-    ):
-
-        return True
-
-    # Known headings
-
+    # Exact keyword headings
     for keyword in HEADING_KEYWORDS:
 
         if normalized == keyword:
             return True
 
-        if normalized.startswith(
-            keyword + " "
-        ):
+        if normalized.startswith(keyword + " "):
             return True
 
-    # Short ALL CAPS heading
-
-    if (
-        len(line.split()) <= 12
-        and line.upper() == line
-        and any(
-            ch.isalpha()
-            for ch in line
-        )
-    ):
-
+    # Short all-uppercase headings
+    if len(text.split()) <= 10 and text.isupper():
         return True
 
     return False
 
 
 # ============================================================
-# WORD CHUNKING
+# CHUNKING
 # ============================================================
 
-def split_words(
-    text,
-    chunk_size=300,
-    overlap=60
-):
+def split_words(text, chunk_size=300, overlap=60):
+    """
+    Split text into overlapping word chunks.
+    """
 
     words = text.split()
 
@@ -458,15 +447,10 @@ def split_words(
             len(words)
         )
 
-        chunk = " ".join(
-            words[start:end]
-        ).strip()
+        chunk = " ".join(words[start:end])
 
-        if chunk:
-
-            chunks.append(
-                chunk
-            )
+        if chunk.strip():
+            chunks.append(chunk.strip())
 
         if end >= len(words):
             break
@@ -479,151 +463,131 @@ def split_words(
     return chunks
 
 
-# ============================================================
-# CREATE SMART CHUNKS
-# ============================================================
-
 def create_chunks(pages):
+    """
+    Create heading-aware chunks.
+    """
 
-    all_chunks = []
+    chunks = []
+
+    current_heading = ""
+    current_text = []
+    current_page = 0
+
+    def save_current():
+
+        nonlocal current_text
+
+        if not current_text:
+            return
+
+        text = "\n".join(current_text)
+
+        text = clean_text(text)
+
+        if not text:
+            current_text = []
+            return
+
+        # Keep heading together with its content
+        if current_heading:
+
+            final_text = (
+                current_heading
+                + "\n"
+                + text
+            )
+
+        else:
+
+            final_text = text
+
+        # Small sections can stay together
+        word_count = len(final_text.split())
+
+        if word_count <= 450:
+
+            chunks.append({
+                "text": final_text,
+                "page": current_page,
+                "heading": current_heading
+            })
+
+        else:
+
+            smaller_chunks = split_words(
+                final_text,
+                chunk_size=300,
+                overlap=60
+            )
+
+            for smaller in smaller_chunks:
+
+                chunks.append({
+                    "text": smaller,
+                    "page": current_page,
+                    "heading": current_heading
+                })
+
+        current_text = []
+
+    # --------------------------------------------------------
+    # Process pages
+    # --------------------------------------------------------
 
     for page_data in pages:
 
-        page_text = page_data["text"]
         page_number = page_data["page"]
 
-        lines = page_text.splitlines()
-
-        current_heading = ""
-        current_section = []
-
-        sections = []
-
-        # Detect sections
+        lines = page_data["text"].splitlines()
 
         for line in lines:
 
-            line = line.strip()
+            line = clean_text(line)
 
             if not line:
                 continue
 
             if is_heading(line):
 
-                if current_section:
-
-                    sections.append({
-                        "heading": current_heading,
-                        "text": " ".join(
-                            current_section
-                        ),
-                        "page": page_number
-                    })
+                save_current()
 
                 current_heading = line
-
-                current_section = []
+                current_page = page_number
 
             else:
 
-                current_section.append(
-                    line
-                )
+                if current_page == 0:
+                    current_page = page_number
 
-        # Last section
+                current_text.append(line)
 
-        if current_section:
+    save_current()
 
-            sections.append({
-                "heading": current_heading,
-                "text": " ".join(
-                    current_section
-                ),
-                "page": page_number
+    # --------------------------------------------------------
+    # Fallback if no chunks
+    # --------------------------------------------------------
+
+    if not chunks:
+
+        complete_text = "\n".join(
+            page["text"]
+            for page in pages
+        )
+
+        for part in split_words(
+            complete_text,
+            chunk_size=300,
+            overlap=60
+        ):
+
+            chunks.append({
+                "text": part,
+                "page": 0,
+                "heading": ""
             })
 
-        # No headings
-
-        if not sections:
-
-            sections = [{
-                "heading": "",
-                "text": page_text,
-                "page": page_number
-            }]
-
-        # Create chunks
-
-        for section in sections:
-
-            heading = section["heading"]
-
-            text = clean_text(
-                section["text"]
-            )
-
-            if not text:
-                continue
-
-            words = text.split()
-
-            # Keep normal sections together
-
-            if len(words) <= 450:
-
-                chunk_text = text
-
-                if heading:
-
-                    chunk_text = (
-                        heading
-                        + "\n"
-                        + chunk_text
-                    )
-
-                all_chunks.append({
-
-                    "text": chunk_text,
-
-                    "heading": heading,
-
-                    "page": section["page"]
-
-                })
-
-            # Split large sections
-
-            else:
-
-                split_chunks = split_words(
-                    text,
-                    chunk_size=300,
-                    overlap=60
-                )
-
-                for chunk in split_chunks:
-
-                    chunk_text = chunk
-
-                    if heading:
-
-                        chunk_text = (
-                            heading
-                            + "\n"
-                            + chunk
-                        )
-
-                    all_chunks.append({
-
-                        "text": chunk_text,
-
-                        "heading": heading,
-
-                        "page": section["page"]
-
-                    })
-
-    return all_chunks
+    return chunks
 
 
 # ============================================================
@@ -631,38 +595,45 @@ def create_chunks(pages):
 # ============================================================
 
 def reset_document_storage():
+    """
+    Remove the old document and create a fresh collection.
+    """
 
     global collection
 
+    print("Resetting document storage...")
+
+    # --------------------------------------------------------
     # Delete uploaded files
+    # --------------------------------------------------------
 
-    try:
+    if os.path.exists(UPLOAD_FOLDER):
 
-        for filename in os.listdir(
-            UPLOAD_FOLDER
-        ):
+        for filename in os.listdir(UPLOAD_FOLDER):
 
             file_path = os.path.join(
                 UPLOAD_FOLDER,
                 filename
             )
 
-            if os.path.isfile(file_path):
+            try:
 
-                os.remove(file_path)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
 
-            elif os.path.isdir(file_path):
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
 
-                shutil.rmtree(file_path)
+            except Exception as e:
+                print(
+                    "Could not delete:",
+                    file_path,
+                    e
+                )
 
-    except Exception as e:
-
-        print(
-            "Upload folder reset error:",
-            e
-        )
-
-    # Delete old collection
+    # --------------------------------------------------------
+    # Delete old Chroma collection
+    # --------------------------------------------------------
 
     try:
 
@@ -670,149 +641,144 @@ def reset_document_storage():
             name="current_document"
         )
 
-    except Exception:
+        print("Old Chroma collection deleted.")
 
-        pass
+    except Exception as e:
 
+        print(
+            "No old Chroma collection to delete:",
+            e
+        )
+
+    # Important:
+    # Remove old Python reference too.
+
+    collection = None
+
+    # --------------------------------------------------------
     # Create fresh collection
+    # --------------------------------------------------------
 
     collection = chroma_client.create_collection(
-
         name="current_document",
-
         metadata={
             "hnsw:space": "cosine"
         },
-
-        embedding_function=embedding_function
+        embedding_function=get_embedding_function()
     )
 
+    print("Fresh Chroma collection created.")
 
-# ============================================================
-# STOP WORDS
-# ============================================================
-
-STOP_WORDS = {
-
-    "what",
-    "is",
-    "are",
-    "was",
-    "were",
-    "the",
-    "a",
-    "an",
-    "of",
-    "for",
-    "to",
-    "in",
-    "on",
-    "and",
-    "or",
-    "with",
-    "by",
-    "from",
-    "how",
-    "why",
-    "where",
-    "when",
-    "which",
-    "who",
-    "does",
-    "do",
-    "can",
-    "could",
-    "would",
-    "should",
-    "explain",
-    "give",
-    "tell",
-    "about",
-    "define",
-    "definition",
-    "describe",
-    "main",
-    "following",
-    "following:",
-    "please"
-}
+    return collection
 
 
 # ============================================================
 # IMPORTANT WORDS
 # ============================================================
 
+STOPWORDS = {
+    "a",
+    "an",
+    "the",
+    "is",
+    "are",
+    "was",
+    "were",
+    "what",
+    "which",
+    "who",
+    "when",
+    "where",
+    "why",
+    "how",
+    "does",
+    "do",
+    "did",
+    "can",
+    "could",
+    "would",
+    "should",
+    "will",
+    "about",
+    "for",
+    "from",
+    "with",
+    "and",
+    "or",
+    "of",
+    "to",
+    "in",
+    "on",
+    "by",
+    "as",
+    "at",
+    "it",
+    "this",
+    "that",
+    "these",
+    "those",
+    "be",
+    "been",
+    "being",
+    "main"
+}
+
+
 def important_words(question):
+    """
+    Extract meaningful words from a question.
+    """
 
     words = re.findall(
         r"[a-zA-Z0-9]+",
         question.lower()
     )
 
-    result = []
-
-    for word in words:
-
-        if len(word) <= 1:
-            continue
-
-        if word in STOP_WORDS:
-            continue
-
-        result.append(word)
-
-    return result
+    return [
+        word
+        for word in words
+        if word not in STOPWORDS
+        and len(word) > 1
+    ]
 
 
 # ============================================================
 # KEYWORD SCORE
 # ============================================================
 
-def keyword_score(
-    question,
-    text
-):
+def keyword_score(question, text):
+    """
+    Calculate keyword overlap score.
+    """
 
-    query_words = important_words(
-        question
-    )
+    q_words = important_words(question)
 
-    if not query_words:
+    if not q_words:
         return 0.0
 
-    normalized_text = normalize_for_comparison(
-        text
-    )
+    text_lower = text.lower()
 
-    matches = 0
+    matched = 0
 
-    for word in query_words:
+    for word in q_words:
 
-        if word in normalized_text:
+        if word in text_lower:
+            matched += 1
 
-            matches += 1
-
-    return matches / len(
-        query_words
-    )
+    return matched / len(q_words)
 
 
 # ============================================================
 # PHRASE SCORE
 # ============================================================
 
-def phrase_score(
-    question,
-    text
-):
+def phrase_score(question, text):
+    """
+    Check exact phrase overlap.
+    """
 
-    q = normalize_for_comparison(
-        question
-    )
-
-    t = normalize_for_comparison(
-        text
-    )
+    q = clean_text(question).lower()
+    t = text.lower()
 
     if not q:
         return 0.0
@@ -820,221 +786,128 @@ def phrase_score(
     if q in t:
         return 1.0
 
-    words = important_words(
-        question
-    )
+    words = important_words(question)
 
-    if len(words) >= 2:
+    if len(words) < 2:
+        return 0.0
 
-        phrase = " ".join(
-            words
+    phrases = []
+
+    for i in range(len(words) - 1):
+
+        phrases.append(
+            words[i] + " " + words[i + 1]
         )
 
-        if phrase in t:
-            return 0.9
+    matched = sum(
+        1
+        for phrase in phrases
+        if phrase in t
+    )
 
-    return 0.0
+    return matched / len(phrases)
 
 
 # ============================================================
 # COVERAGE SCORE
 # ============================================================
 
-def coverage_score(
-    question,
-    text
-):
+def coverage_score(question, text):
+    """
+    Measure how many important question words
+    appear in the retrieved text.
+    """
 
-    words = important_words(
-        question
-    )
+    words = important_words(question)
 
     if not words:
         return 0.0
 
-    text_normalized = normalize_for_comparison(
-        text
+    text_lower = text.lower()
+
+    matched = sum(
+        1
+        for word in words
+        if word in text_lower
     )
 
-    found = 0
-
-    for word in words:
-
-        if word in text_normalized:
-            found += 1
-
-    return found / len(words)
+    return matched / len(words)
 
 
 # ============================================================
-# QUERY SECTION DETECTION
+# HEADING SCORE
 # ============================================================
 
-def extract_possible_section(question):
-
-    q = normalize_for_comparison(
-        question
-    )
-
-    possible_sections = [
-
-        "main gateway functions",
-
-        "gateway functions",
-
-        "m2m gateway",
-
-        "parallel hardware",
-
-        "parallel software",
-
-        "distributed memory",
-
-        "interconnection networks",
-
-        "graphics processing units",
-
-        "vector processors",
-
-        "mimd systems",
-
-        "simd systems",
-
-        "software defined networking",
-
-        "software defined network"
-    ]
-
-    for section in possible_sections:
-
-        if section in q:
-
-            return section
-
-    return None
-
-
-# ============================================================
-# HEADING MATCH
-# ============================================================
-
-def heading_matches_query(
-    question,
-    heading
-):
+def heading_score(question, heading):
+    """
+    Give higher score when the question terms
+    match the section heading.
+    """
 
     if not heading:
-        return False
+        return 0.0
 
-    q = normalize_for_comparison(
-        question
-    )
-
-    h = normalize_for_comparison(
+    return keyword_score(
+        question,
         heading
     )
 
-    if not h:
-        return False
-
-    if h in q:
-        return True
-
-    heading_words = [
-
-        word
-
-        for word in h.split()
-
-        if word not in STOP_WORDS
-
-    ]
-
-    if not heading_words:
-        return False
-
-    matched = 0
-
-    for word in heading_words:
-
-        if word in q:
-            matched += 1
-
-    return matched >= max(
-        1,
-        len(heading_words) // 2
-    )
-
 
 # ============================================================
-# RETRIEVE CHUNKS
+# RETRIEVAL
 # ============================================================
 
 def retrieve_chunks(question):
+    """
+    Hybrid retrieval:
+    semantic similarity + keyword + phrase + coverage + heading.
+    """
 
-    if collection.count() == 0:
+    current_collection = get_collection()
 
-        print(
-            "No chunks in Chroma."
-        )
-
+    if current_collection.count() == 0:
         return []
 
-    print(
-        "Retrieving for:",
-        question
-    )
-
+    # --------------------------------------------------------
     # Query variations
+    # --------------------------------------------------------
 
-    query_variations = [
-        question
-    ]
+    q_variations = []
 
-    words = important_words(
-        question
-    )
+    original_question = clean_text(question)
+
+    if original_question:
+        q_variations.append(
+            original_question
+        )
+
+    words = important_words(question)
 
     if words:
 
-        important_query = " ".join(
-            words
-        )
+        cleaned_question = " ".join(words)
 
-        if (
-            important_query.lower()
-            != question.lower()
-        ):
-
-            query_variations.append(
-                important_query
+        if cleaned_question not in q_variations:
+            q_variations.append(
+                cleaned_question
             )
 
-    results_map = {}
-
-    total_chunks = collection.count()
-
-    search_count = min(
-        MAX_RESULTS,
-        total_chunks
-    )
-
     # --------------------------------------------------------
-    # Semantic search using Chroma's built-in embeddings
+    # Semantic search
     # --------------------------------------------------------
 
-    for query_text in query_variations:
+    semantic_candidates = {}
+
+    for query in q_variations:
 
         try:
 
-            results = collection.query(
-
-                query_texts=[
-                    query_text
-                ],
-
-                n_results=search_count,
-
+            results = current_collection.query(
+                query_texts=[query],
+                n_results=min(
+                    MAX_RESULTS,
+                    current_collection.count()
+                ),
                 include=[
                     "documents",
                     "metadatas",
@@ -1066,91 +939,47 @@ def retrieve_chunks(question):
             [[]]
         )[0]
 
-        for index, document in enumerate(
-            documents
-        ):
+        for i, document in enumerate(documents):
 
             metadata = (
-
-                metadatas[index]
-
-                if index < len(metadatas)
-
+                metadatas[i]
+                if i < len(metadatas)
                 else {}
-
             )
 
             distance = (
-
-                distances[index]
-
-                if index < len(distances)
-
+                distances[i]
+                if i < len(distances)
                 else 1.0
-
             )
 
-            similarity = max(
+            key = document
 
-                0.0,
+            if key not in semantic_candidates:
 
-                min(
-
-                    1.0,
-
-                    1.0 - float(distance)
-
-                )
-
-            )
-
-            if document not in results_map:
-
-                results_map[document] = {
-
+                semantic_candidates[key] = {
                     "text": document,
-
-                    "heading": metadata.get(
-                        "heading",
-                        ""
-                    ),
-
-                    "page": metadata.get(
-                        "page",
-                        0
-                    ),
-
-                    "filename": metadata.get(
-                        "filename",
-                        ""
-                    ),
-
-                    "semantic": similarity
-
+                    "metadata": metadata,
+                    "distance": distance
                 }
 
             else:
 
-                results_map[
-                    document
-                ]["semantic"] = max(
-
-                    results_map[
-                        document
-                    ]["semantic"],
-
-                    similarity
-
+                semantic_candidates[key]["distance"] = min(
+                    semantic_candidates[key]["distance"],
+                    distance
                 )
 
     # --------------------------------------------------------
-    # EXACT KEYWORD SCAN
+    # Lexical scan
+    #
+    # This is useful for exact headings such as:
+    # "Main gateway functions"
     # --------------------------------------------------------
 
     try:
 
-        all_data = collection.get(
-
+        all_data = current_collection.get(
             include=[
                 "documents",
                 "metadatas"
@@ -1167,58 +996,37 @@ def retrieve_chunks(question):
             []
         )
 
-        for index, document in enumerate(
+        # Avoid processing an unnecessarily huge number
+        # of documents.
+
+        for i, document in enumerate(
             all_documents
         ):
 
             metadata = (
-
-                all_metadatas[index]
-
-                if index < len(all_metadatas)
-
+                all_metadatas[i]
+                if i < len(all_metadatas)
                 else {}
-
             )
 
-            if document not in results_map:
+            if document not in semantic_candidates:
 
-                k_score = keyword_score(
+                ks = keyword_score(
                     question,
                     document
                 )
 
-                p_score = phrase_score(
+                ps = phrase_score(
                     question,
                     document
                 )
 
-                if (
-                    k_score > 0
-                    or p_score > 0
-                ):
+                if ks > 0 or ps > 0:
 
-                    results_map[document] = {
-
+                    semantic_candidates[document] = {
                         "text": document,
-
-                        "heading": metadata.get(
-                            "heading",
-                            ""
-                        ),
-
-                        "page": metadata.get(
-                            "page",
-                            0
-                        ),
-
-                        "filename": metadata.get(
-                            "filename",
-                            ""
-                        ),
-
-                        "semantic": 0.0
-
+                        "metadata": metadata,
+                        "distance": 1.0
                     }
 
     except Exception as e:
@@ -1229,445 +1037,318 @@ def retrieve_chunks(question):
         )
 
     # --------------------------------------------------------
-    # SCORE CANDIDATES
+    # Score candidates
     # --------------------------------------------------------
 
-    candidates = []
+    scored = []
 
-    for item in results_map.values():
+    for item in semantic_candidates.values():
 
         text = item["text"]
 
-        heading = item["heading"]
-
-        semantic = item.get(
-            "semantic",
-            0.0
+        metadata = item.get(
+            "metadata",
+            {}
         )
 
-        k_score = keyword_score(
-            question,
-            text
+        distance = item.get(
+            "distance",
+            1.0
         )
 
-        p_score = phrase_score(
-            question,
-            text
-        )
+        # Convert cosine distance into similarity-like score
 
-        c_score = coverage_score(
-            question,
-            text
-        )
-
-        heading_score = 0.0
-
-        if heading_matches_query(
-            question,
-            heading
-        ):
-
-            heading_score = 1.0
-
-        score = (
-
-            semantic * 0.35
-
-            + k_score * 0.30
-
-            + p_score * 0.20
-
-            + c_score * 0.10
-
-            + heading_score * 0.05
-
-        )
-
-        item["keyword"] = k_score
-
-        item["phrase"] = p_score
-
-        item["coverage"] = c_score
-
-        item["heading_score"] = heading_score
-
-        item["score"] = score
-
-        candidates.append(item)
-
-    if not candidates:
-
-        print(
-            "No candidates found."
-        )
-
-        return []
-
-    # --------------------------------------------------------
-    # EXACT SECTION PRIORITY
-    # --------------------------------------------------------
-
-    exact_section = extract_possible_section(
-        question
-    )
-
-    if exact_section:
-
-        exact_candidates = []
-
-        for item in candidates:
-
-            heading = normalize_for_comparison(
-                item.get(
-                    "heading",
-                    ""
-                )
+        semantic_score = max(
+            0.0,
+            min(
+                1.0,
+                1.0 - distance
             )
+        )
 
-            text = normalize_for_comparison(
-                item.get(
-                    "text",
-                    ""
-                )
+        ks = keyword_score(
+            question,
+            text
+        )
+
+        ps = phrase_score(
+            question,
+            text
+        )
+
+        cs = coverage_score(
+            question,
+            text
+        )
+
+        hs = heading_score(
+            question,
+            metadata.get(
+                "heading",
+                ""
             )
+        )
 
-            if (
-                exact_section in heading
-                or exact_section in text
-            ):
+        final_score = (
+            semantic_score * 0.45
+            + ks * 0.20
+            + ps * 0.15
+            + cs * 0.10
+            + hs * 0.10
+        )
 
-                exact_candidates.append(
-                    item
-                )
-
-        if exact_candidates:
-
-            candidates = exact_candidates
+        scored.append({
+            "text": text,
+            "metadata": metadata,
+            "score": final_score,
+            "semantic_score": semantic_score,
+            "keyword_score": ks,
+            "phrase_score": ps,
+            "coverage_score": cs,
+            "heading_score": hs
+        })
 
     # --------------------------------------------------------
-    # SORT
+    # Sort
     # --------------------------------------------------------
 
-    candidates.sort(
-
-        key=lambda item: (
-
-            item["keyword"],
-
-            item["phrase"],
-
-            item["coverage"],
-
-            item["heading_score"],
-
-            item["score"],
-
-            item["semantic"]
-
-        ),
-
+    scored.sort(
+        key=lambda x: x["score"],
         reverse=True
     )
 
-    # --------------------------------------------------------
-    # DEBUG
-    # --------------------------------------------------------
-
-    print(
-        "Top retrieved chunks:"
-    )
-
-    for item in candidates[:5]:
-
-        print(
-
-            "Score:",
-            round(
-                item["score"],
-                3
-            ),
-
-            "| Keyword:",
-            round(
-                item["keyword"],
-                3
-            ),
-
-            "| Heading:",
-            item["heading"]
-
-        )
-
-    return candidates[:MAX_RESULTS]
+    return scored[:MAX_RESULTS]
 
 
 # ============================================================
-# SELECT FINAL CONTEXT
+# EXACT SECTION PRIORITY
 # ============================================================
 
-def select_context(
-    question,
-    candidates
-):
+def select_context(question, retrieved):
+    """
+    Select the best chunks for the LLM.
+    """
 
-    if not candidates:
+    if not retrieved:
         return []
 
-    selected = []
-
-    exact_section = extract_possible_section(
+    q_normalized = normalize_for_comparison(
         question
     )
 
-    # First select exact section matches
+    # --------------------------------------------------------
+    # First check for exact heading matches
+    # --------------------------------------------------------
 
-    if exact_section:
+    exact_heading_matches = []
 
-        for item in candidates:
+    question_words = set(
+        important_words(question)
+    )
 
-            heading = normalize_for_comparison(
-                item.get(
-                    "heading",
-                    ""
+    for item in retrieved:
+
+        heading = item["metadata"].get(
+            "heading",
+            ""
+        )
+
+        if not heading:
+            continue
+
+        heading_words = set(
+            important_words(heading)
+        )
+
+        if not heading_words:
+            continue
+
+        overlap = len(
+            question_words
+            & heading_words
+        )
+
+        # Strong heading match
+        if overlap >= 1:
+
+            exact_heading_matches.append(
+                (
+                    overlap,
+                    item
                 )
             )
 
-            text = normalize_for_comparison(
-                item.get(
-                    "text",
-                    ""
-                )
-            )
+    exact_heading_matches.sort(
+        key=lambda x: (
+            x[0],
+            x[1]["score"]
+        ),
+        reverse=True
+    )
 
-            if (
-                exact_section in heading
-                or exact_section in text
-            ):
+    selected = []
 
-                if item not in selected:
+    # --------------------------------------------------------
+    # Add best heading match first
+    # --------------------------------------------------------
 
-                    selected.append(item)
-
-                if len(selected) >= MAX_CONTEXT_CHUNKS:
-
-                    break
-
-    # Fill remaining context
-
-    for item in candidates:
+    for _, item in exact_heading_matches:
 
         if item not in selected:
 
             selected.append(item)
 
         if len(selected) >= MAX_CONTEXT_CHUNKS:
-
             break
 
-    return selected[:MAX_CONTEXT_CHUNKS]
+    # --------------------------------------------------------
+    # Add remaining high scoring chunks
+    # --------------------------------------------------------
+
+    for item in retrieved:
+
+        if item not in selected:
+
+            selected.append(item)
+
+        if len(selected) >= MAX_CONTEXT_CHUNKS:
+            break
+
+    return selected
 
 
 # ============================================================
-# OLLAMA CLOUD STREAM
+# BUILD PROMPT
 # ============================================================
 
-def generate_answer_stream(
-    question,
-    context_chunks
-):
-
-    if not context_chunks:
-
-        yield {
-            "type": "answer",
-            "content": NO_ANSWER
-        }
-
-        return
-
-    if not OLLAMA_API_KEY:
-
-        yield {
-
-            "type": "error",
-
-            "message": (
-                "Ollama API key is not configured. "
-                "Please add OLLAMA_API_KEY."
-            )
-
-        }
-
-        return
-
-    # Build context
+def build_prompt(question, context_chunks):
+    """
+    Build a strict document-only prompt.
+    """
 
     context_parts = []
 
-    for index, chunk in enumerate(
+    for index, item in enumerate(
         context_chunks,
         start=1
     ):
 
-        heading = chunk.get(
+        metadata = item.get(
+            "metadata",
+            {}
+        )
+
+        heading = metadata.get(
             "heading",
             ""
         )
 
-        page = chunk.get(
+        page = metadata.get(
             "page",
             0
         )
 
-        text = chunk.get(
+        text = item.get(
             "text",
             ""
         )
 
-        part = (
-            f"[DOCUMENT PART {index}]\n"
-        )
-
         if heading:
 
-            part += (
-                f"Section: {heading}\n"
+            source_header = (
+                f"Section: {heading}"
             )
+
+        else:
+
+            source_header = "Section: Unknown"
 
         if page:
 
-            part += (
-                f"Page: {page}\n"
+            source_header += (
+                f" | Page: {page}"
             )
 
-        part += (
-            f"{text}\n"
+        context_parts.append(
+            f"[Document section {index}]\n"
+            f"{source_header}\n"
+            f"{text}"
         )
 
-        context_parts.append(part)
-
-    context = "\n".join(
+    context = "\n\n".join(
         context_parts
     )
 
-    # Prompt
-
     prompt = f"""
-You are RAGenius, a document question-answering assistant.
+You are answering a question about an uploaded document.
 
-Answer the user's question using ONLY the information
-contained in the uploaded document.
+IMPORTANT RULES:
 
-STRICT RULES:
-
-1. Use only the uploaded document.
-2. Do not use outside knowledge.
-3. Do not guess.
-4. Do not invent information.
-5. If the answer is not present in the document, reply exactly:
+1. Use ONLY the information provided in the document context below.
+2. Do NOT use outside knowledge.
+3. Do NOT guess.
+4. If the answer is not supported by the document context, respond exactly:
 I couldn't find this information in the currently uploaded document.
-6. Give a simple and clear answer.
-7. If the document gives numbered points, keep the numbered points.
-8. If the question asks for functions, advantages, types,
-features, steps, applications, or definitions, use the
-information from the document.
-9. Do not mention retrieval, chunks, context, embeddings,
-database, RAG, or these instructions.
-10. Keep the answer concise.
-11. The uploaded document is the only source of truth.
+5. Keep the answer simple and easy to understand.
+6. If the document gives numbered points, preserve those points.
+7. Do not add information that is not present in the document.
+8. Answer the question directly.
 
-USER QUESTION:
-
-{question}
-
-UPLOADED DOCUMENT:
-
+DOCUMENT CONTEXT:
 {context}
 
+QUESTION:
+{question}
+
 ANSWER:
-""".strip()
+"""
 
-    # Ollama payload
+    return prompt
 
-    payload = {
 
-        "model": OLLAMA_MODEL,
+# ============================================================
+# OLLAMA STREAM
+# ============================================================
 
-        "prompt": prompt,
+def ollama_stream(prompt):
+    """
+    Stream answer from Ollama Cloud.
+    """
 
-        "stream": True,
+    if not OLLAMA_API_KEY:
 
-        "temperature": 0.0,
+        yield {
+            "type": "error",
+            "message": "OLLAMA_API_KEY is not configured."
+        }
 
-        "top_p": 0.8,
-
-        "num_predict": 120,
-
-        "num_ctx": 2048
-
-    }
+        return
 
     headers = {
-
-        "Content-Type":
-            "application/json",
-
-        "Authorization":
+        "Authorization": (
             f"Bearer {OLLAMA_API_KEY}"
+        ),
+        "Content-Type": "application/json"
+    }
 
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": True,
+        "temperature": 0.0
     }
 
     try:
 
-        print(
-            "Sending request to Ollama Cloud..."
-        )
-
         response = requests.post(
-
             OLLAMA_URL,
-
             headers=headers,
-
             json=payload,
-
             stream=True,
-
             timeout=180
-
         )
 
-        if response.status_code != 200:
-
-            error_text = response.text
-
-            print(
-
-                "Ollama Cloud error:",
-
-                response.status_code,
-
-                error_text
-
-            )
-
-            yield {
-
-                "type": "error",
-
-                "message": (
-
-                    f"Ollama Cloud error "
-                    f"({response.status_code}). "
-                    f"Please check your API key and model."
-
-                )
-
-            }
-
-            return
-
-        got_answer = False
+        response.raise_for_status()
 
         for line in response.iter_lines(
             decode_unicode=True
@@ -1680,85 +1361,57 @@ ANSWER:
 
                 data = json.loads(line)
 
-            except Exception:
+            except json.JSONDecodeError:
 
                 continue
 
-            token = data.get(
-                "response",
-                ""
-            )
-
-            if token:
-
-                got_answer = True
+            if "response" in data:
 
                 yield {
-
                     "type": "token",
-
-                    "content": token
-
+                    "text": data["response"]
                 }
 
-            if data.get(
-                "done",
-                False
-            ):
+            if data.get("done"):
 
-                break
-
-        if not got_answer:
-
-            yield {
-
-                "type": "answer",
-
-                "content": NO_ANSWER
-
-            }
+                yield {
+                    "type": "done"
+                }
 
     except requests.exceptions.Timeout:
 
         yield {
-
             "type": "error",
-
-            "message":
-                "The AI service took too long to respond."
-
+            "message": "The AI request timed out. Please try again."
         }
 
-    except requests.exceptions.ConnectionError:
+    except requests.exceptions.RequestException as e:
+
+        print(
+            "Ollama request error:",
+            e
+        )
 
         yield {
-
             "type": "error",
-
-            "message":
-                "Could not connect to Ollama Cloud."
-
+            "message": "Could not connect to Ollama Cloud."
         }
 
     except Exception as e:
 
         print(
-            "Ollama generation error:",
+            "Ollama error:",
             e
         )
 
         yield {
-
             "type": "error",
-
-            "message":
-                "An error occurred while generating the answer."
-
+            "message": "An unexpected error occurred."
         }
 
 
 # ============================================================
-# LANDING PAGE
+# HOME PAGE
 # ============================================================
 
 @app.route("/")
@@ -1791,17 +1444,19 @@ def dashboard():
 )
 def upload_file():
 
+    global collection
+
     try:
+
+        # ----------------------------------------------------
+        # Check file
+        # ----------------------------------------------------
 
         if "file" not in request.files:
 
             return jsonify({
-
                 "success": False,
-
-                "error":
-                    "No file selected."
-
+                "error": "No file uploaded."
             }), 400
 
         file = request.files["file"]
@@ -1809,12 +1464,8 @@ def upload_file():
         if not file.filename:
 
             return jsonify({
-
                 "success": False,
-
-                "error":
-                    "No file selected."
-
+                "error": "No file selected."
             }), 400
 
         if not allowed_file(
@@ -1822,13 +1473,13 @@ def upload_file():
         ):
 
             return jsonify({
-
                 "success": False,
-
-                "error":
-                    "Only PDF and DOCX files are supported."
-
+                "error": "Only PDF and DOCX files are allowed."
             }), 400
+
+        # ----------------------------------------------------
+        # Check size before processing
+        # ----------------------------------------------------
 
         file.seek(
             0,
@@ -1842,35 +1493,46 @@ def upload_file():
         if file_size > MAX_FILE_SIZE:
 
             return jsonify({
-
                 "success": False,
-
-                "error":
-                    "File size must be less than 10 MB."
-
+                "error": "File size must be 10 MB or less."
             }), 400
 
-        # New document replaces old one
+        if file_size == 0:
+
+            return jsonify({
+                "success": False,
+                "error": "The uploaded file is empty."
+            }), 400
+
+        # ----------------------------------------------------
+        # Reset old document
+        # ----------------------------------------------------
 
         reset_document_storage()
 
-        safe_filename = os.path.basename(
+        # ----------------------------------------------------
+        # Save new file
+        # ----------------------------------------------------
+
+        filename = os.path.basename(
             file.filename
         )
 
         file_path = os.path.join(
             UPLOAD_FOLDER,
-            safe_filename
+            filename
         )
 
         file.save(file_path)
 
         print(
-            "Uploaded:",
-            safe_filename
+            "Uploaded file:",
+            filename
         )
 
-        # Extract
+        # ----------------------------------------------------
+        # Extract text
+        # ----------------------------------------------------
 
         pages = extract_document(
             file_path
@@ -1879,15 +1541,13 @@ def upload_file():
         if not pages:
 
             return jsonify({
-
                 "success": False,
-
-                "error":
-                    "Could not extract text from the uploaded document."
-
+                "error": "Could not extract text from the document."
             }), 400
 
+        # ----------------------------------------------------
         # Create chunks
+        # ----------------------------------------------------
 
         chunks = create_chunks(
             pages
@@ -1896,12 +1556,8 @@ def upload_file():
         if not chunks:
 
             return jsonify({
-
                 "success": False,
-
-                "error":
-                    "No readable text was found in the document."
-
+                "error": "No readable text was found in the document."
             }), 400
 
         print(
@@ -1910,97 +1566,91 @@ def upload_file():
         )
 
         # ----------------------------------------------------
-        # Store documents in Chroma.
-        #
-        # Chroma now creates embeddings automatically.
-        # No SentenceTransformer/PyTorch is loaded.
+        # Get current collection
         # ----------------------------------------------------
 
-        texts = [
+        current_collection = get_collection()
 
-            chunk["text"]
+        # ----------------------------------------------------
+        # Add chunks in batches
+        #
+        # This helps reduce peak memory usage on Render Free.
+        # ----------------------------------------------------
 
-            for chunk in chunks
+        batch_size = 16
 
-        ]
-
-        ids = []
-
-        metadatas = []
-
-        for index, chunk in enumerate(
-            chunks
+        for start in range(
+            0,
+            len(chunks),
+            batch_size
         ):
 
-            ids.append(
-                f"chunk_{index}"
-            )
+            batch = chunks[
+                start:start + batch_size
+            ]
 
-            metadatas.append({
+            ids = [
+                f"chunk_{i}"
+                for i in range(
+                    start,
+                    start + len(batch)
+                )
+            ]
 
-                "heading":
-                    chunk.get(
-                        "heading",
-                        ""
-                    ),
+            documents = [
+                item["text"]
+                for item in batch
+            ]
 
-                "page":
-                    int(
-                        chunk.get(
+            metadatas = []
+
+            for item in batch:
+
+                metadatas.append({
+                    "page": int(
+                        item.get(
                             "page",
                             0
                         )
                     ),
+                    "heading": item.get(
+                        "heading",
+                        ""
+                    )
+                })
 
-                "filename":
-                    safe_filename
+            current_collection.add(
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas
+            )
 
-            })
-
-        collection.add(
-
-            ids=ids,
-
-            documents=texts,
-
-            metadatas=metadatas
-
-        )
+            print(
+                f"Indexed {min(start + batch_size, len(chunks))}"
+                f"/{len(chunks)} chunks"
+            )
 
         print(
-            "Stored chunks:",
-            collection.count()
+            "Document indexing completed."
         )
 
         return jsonify({
-
             "success": True,
-
-            "message":
-                "Document uploaded successfully.",
-
-            "filename":
-                safe_filename,
-
-            "chunks":
-                len(chunks)
-
+            "filename": filename,
+            "chunks": len(chunks),
+            "message": "Document uploaded successfully."
         })
 
     except Exception as e:
 
         print(
-            "UPLOAD ERROR:",
-            e
+            "Upload error:",
+            repr(e)
         )
 
         return jsonify({
-
             "success": False,
-
-            "error":
-                str(e)
-
+            "error": str(e)
         }), 500
 
 
@@ -2023,178 +1673,248 @@ def query():
         if not data:
 
             return jsonify({
-
-                "answer":
-                    NO_ANSWER
-
+                "success": False,
+                "error": "Invalid request."
             }), 400
 
-        question = str(
+        question = clean_text(
             data.get(
                 "question",
                 ""
             )
-        ).strip()
+        )
 
         if not question:
 
             return jsonify({
-
-                "answer":
-                    "Please enter a question."
-
+                "success": False,
+                "error": "Please enter a question."
             }), 400
 
-        document_count = collection.count()
+        # ----------------------------------------------------
+        # Check document
+        # ----------------------------------------------------
 
-        print(
-            "Current document chunks:",
-            document_count
-        )
+        current_collection = get_collection()
 
-        if document_count == 0:
+        if current_collection.count() == 0:
 
-            return jsonify({
+            return Response(
+                json.dumps({
+                    "type": "done",
+                    "answer": NO_ANSWER
+                }) + "\n",
+                mimetype="application/x-ndjson"
+            )
 
-                "answer":
-                    NO_ANSWER
-
-            })
-
+        # ----------------------------------------------------
         # Retrieve
+        # ----------------------------------------------------
 
-        candidates = retrieve_chunks(
+        retrieved = retrieve_chunks(
             question
         )
 
-        if not candidates:
+        if not retrieved:
 
-            return jsonify({
+            return Response(
+                json.dumps({
+                    "type": "done",
+                    "answer": NO_ANSWER
+                }) + "\n",
+                mimetype="application/x-ndjson"
+            )
 
-                "answer":
-                    NO_ANSWER
-
-            })
-
+        # ----------------------------------------------------
         # Select context
+        # ----------------------------------------------------
 
         context_chunks = select_context(
             question,
-            candidates
+            retrieved
         )
 
         if not context_chunks:
 
-            return jsonify({
-
-                "answer":
-                    NO_ANSWER
-
-            })
-
-        print(
-            "Context chunks selected:",
-            len(context_chunks)
-        )
-
-        # Source information
-
-        filename = ""
-
-        pages = []
-
-        for chunk in context_chunks:
-
-            if not filename:
-
-                filename = chunk.get(
-                    "filename",
-                    ""
-                )
-
-            page = chunk.get(
-                "page",
-                0
+            return Response(
+                json.dumps({
+                    "type": "done",
+                    "answer": NO_ANSWER
+                }) + "\n",
+                mimetype="application/x-ndjson"
             )
 
-            if page:
+        # ----------------------------------------------------
+        # Minimum relevance check
+        # ----------------------------------------------------
 
-                pages.append(page)
-
-        pages = sorted(
-            list(set(pages))
+        best_score = max(
+            item["score"]
+            for item in context_chunks
         )
 
-        # Streaming response
+        best_keyword = max(
+            item["keyword_score"]
+            for item in context_chunks
+        )
+
+        best_phrase = max(
+            item["phrase_score"]
+            for item in context_chunks
+        )
+
+        # If retrieval has almost no connection
+        # with the question, do not ask the LLM
+        # to guess.
+
+        if (
+            best_score < 0.20
+            and best_keyword == 0
+            and best_phrase == 0
+        ):
+
+            return Response(
+                json.dumps({
+                    "type": "done",
+                    "answer": NO_ANSWER
+                }) + "\n",
+                mimetype="application/x-ndjson"
+            )
+
+        # ----------------------------------------------------
+        # Build prompt
+        # ----------------------------------------------------
+
+        prompt = build_prompt(
+            question,
+            context_chunks
+        )
+
+        # ----------------------------------------------------
+        # Stream response
+        # ----------------------------------------------------
 
         def generate():
 
-            source = {
+            full_answer = ""
 
-                "filename":
-                    filename,
-
-                "pages":
-                    pages
-
-            }
-
-            yield (
-
-                json.dumps({
-
-                    "type":
-                        "source",
-
-                    "source":
-                        source
-
-                })
-
-                + "\n"
-
-            )
-
-            for item in generate_answer_stream(
-
-                question,
-
-                context_chunks
-
+            for item in ollama_stream(
+                prompt
             ):
 
-                yield (
+                if item["type"] == "token":
 
-                    json.dumps(item)
+                    full_answer += item["text"]
 
-                    + "\n"
+                    yield (
+                        json.dumps(item)
+                        + "\n"
+                    )
 
-                )
+                elif item["type"] == "error":
+
+                    yield (
+                        json.dumps(item)
+                        + "\n"
+                    )
+
+                    return
+
+                elif item["type"] == "done":
+
+                    # ----------------------------------------
+                    # Safety check
+                    # ----------------------------------------
+
+                    cleaned_answer = (
+                        full_answer.strip()
+                    )
+
+                    # If the model produced an empty answer
+                    if not cleaned_answer:
+
+                        yield (
+                            json.dumps({
+                                "type": "token",
+                                "text": NO_ANSWER
+                            })
+                            + "\n"
+                        )
+
+                    # ----------------------------------------
+                    # Send source information
+                    # ----------------------------------------
+
+                    sources = []
+
+                    for item2 in context_chunks:
+
+                        metadata = item2.get(
+                            "metadata",
+                            {}
+                        )
+
+                        source = {
+                            "page": metadata.get(
+                                "page",
+                                0
+                            ),
+                            "heading": metadata.get(
+                                "heading",
+                                ""
+                            )
+                        }
+
+                        if source not in sources:
+                            sources.append(
+                                source
+                            )
+
+                    yield (
+                        json.dumps({
+                            "type": "sources",
+                            "sources": sources
+                        })
+                        + "\n"
+                    )
+
+                    yield (
+                        json.dumps({
+                            "type": "done"
+                        })
+                        + "\n"
+                    )
 
         return Response(
-
             stream_with_context(
                 generate()
             ),
-
-            mimetype=
-                "application/x-ndjson"
-
+            mimetype="application/x-ndjson"
         )
 
     except Exception as e:
 
         print(
-            "QUERY ERROR:",
-            e
+            "Query error:",
+            repr(e)
         )
 
-        return jsonify({
+        def error_stream():
 
-            "answer":
-                "An error occurred while processing your question."
+            yield (
+                json.dumps({
+                    "type": "error",
+                    "message": "An error occurred while processing your question."
+                })
+                + "\n"
+            )
 
-        }), 500
+        return Response(
+            stream_with_context(
+                error_stream()
+            ),
+            mimetype="application/x-ndjson"
+        )
 
 
 # ============================================================
@@ -2204,40 +1924,41 @@ def query():
 @app.route("/health")
 def health():
 
-    return jsonify({
+    try:
 
-        "status":
-            "ok",
+        current_collection = get_collection()
 
-        "document_chunks":
-            collection.count(),
+        count = current_collection.count()
 
-        "ollama_model":
-            OLLAMA_MODEL,
+        return jsonify({
+            "status": "ok",
+            "document_loaded": count > 0,
+            "chunks": count
+        })
 
-        "ollama_key_configured":
-            bool(OLLAMA_API_KEY)
+    except Exception as e:
 
-    })
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
 
 
 # ============================================================
-# RUN APPLICATION
+# RUN
 # ============================================================
 
 if __name__ == "__main__":
 
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
     app.run(
-
         host="0.0.0.0",
-
-        port=int(
-            os.environ.get(
-                "PORT",
-                5000
-            )
-        ),
-
+        port=port,
         debug=False
-
     )
