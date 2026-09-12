@@ -18,7 +18,7 @@ from flask import (
 import pymupdf
 from docx import Document
 import chromadb
-from sentence_transformers import SentenceTransformer
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 
 # ============================================================
@@ -45,7 +45,8 @@ os.makedirs(CHROMA_FOLDER, exist_ok=True)
 # CONFIGURATION
 # ============================================================
 
-MAX_FILE_SIZE = 10 * 1024 * 1024       # 10 MB
+MAX_FILE_SIZE = 10 * 1024 * 1024
+
 MAX_RESULTS = 30
 MAX_CONTEXT_CHUNKS = 4
 
@@ -79,19 +80,6 @@ OLLAMA_API_KEY = os.getenv(
 
 
 # ============================================================
-# EMBEDDING MODEL
-# ============================================================
-
-print("Loading embedding model...")
-
-embedding_model = SentenceTransformer(
-    "all-MiniLM-L6-v2"
-)
-
-print("Embedding model loaded.")
-
-
-# ============================================================
 # CHROMA DATABASE
 # ============================================================
 
@@ -99,26 +87,32 @@ chroma_client = chromadb.PersistentClient(
     path=CHROMA_FOLDER
 )
 
+# Lightweight ONNX-based embedding function.
+# This avoids loading PyTorch + SentenceTransformer.
+embedding_function = DefaultEmbeddingFunction()
+
 
 def get_collection():
     """
     Get the existing current_document collection.
 
     The collection is NOT deleted when Flask starts.
-    This prevents documents from disappearing after restart.
     """
 
     try:
         return chroma_client.get_collection(
-            name="current_document"
+            name="current_document",
+            embedding_function=embedding_function
         )
 
     except Exception:
+
         return chroma_client.create_collection(
             name="current_document",
             metadata={
                 "hnsw:space": "cosine"
-            }
+            },
+            embedding_function=embedding_function
         )
 
 
@@ -137,10 +131,7 @@ def allowed_file(filename):
     if "." not in filename:
         return False
 
-    extension = filename.rsplit(
-        ".",
-        1
-    )[1].lower()
+    extension = filename.rsplit(".", 1)[1].lower()
 
     return extension in ALLOWED_EXTENSIONS
 
@@ -150,10 +141,7 @@ def clean_text(text):
     if not text:
         return ""
 
-    text = text.replace(
-        "\x00",
-        " "
-    )
+    text = text.replace("\x00", " ")
 
     text = re.sub(
         r"[ \t]+",
@@ -180,22 +168,16 @@ def extract_pdf(file_path):
 
     try:
 
-        pdf = pymupdf.open(
-            file_path
-        )
+        pdf = pymupdf.open(file_path)
 
         for page_number, page in enumerate(
             pdf,
             start=1
         ):
 
-            text = page.get_text(
-                "text"
-            )
+            text = page.get_text("text")
 
-            text = clean_text(
-                text
-            )
+            text = clean_text(text)
 
             if text:
 
@@ -228,16 +210,11 @@ def extract_docx(file_path):
 
     try:
 
-        document = Document(
-            file_path
-        )
+        document = Document(file_path)
 
         content = []
 
-        # ----------------------------------------------------
         # Paragraphs
-        # ----------------------------------------------------
-
         for paragraph in document.paragraphs:
 
             text = clean_text(
@@ -245,15 +222,9 @@ def extract_docx(file_path):
             )
 
             if text:
+                content.append(text)
 
-                content.append(
-                    text
-                )
-
-        # ----------------------------------------------------
         # Tables
-        # ----------------------------------------------------
-
         for table in document.tables:
 
             for row in table.rows:
@@ -267,10 +238,7 @@ def extract_docx(file_path):
                     )
 
                     if cell_text:
-
-                        cells.append(
-                            cell_text
-                        )
+                        cells.append(cell_text)
 
                 if cells:
 
@@ -278,9 +246,7 @@ def extract_docx(file_path):
                         " | ".join(cells)
                     )
 
-        full_text = "\n".join(
-            content
-        )
+        full_text = "\n".join(content)
 
         if full_text.strip():
 
@@ -414,36 +380,31 @@ def is_heading(line):
         line
     )
 
-    # --------------------------------------------------------
     # Numbered headings
     # Examples:
     # 1. Introduction
     # 2.3 Architecture
     # 2.6 Main gateway functions
-    # --------------------------------------------------------
 
     if re.match(
         r"^\d+(?:\.\d+)*\s+[A-Za-z]",
         line
     ):
+
         return True
 
-    # --------------------------------------------------------
-    # Numbered headings
     # Examples:
     # 1) Introduction
     # 2- Architecture
-    # --------------------------------------------------------
 
     if re.match(
         r"^\d+[\)\-]\s+[A-Za-z]",
         line
     ):
+
         return True
 
-    # --------------------------------------------------------
     # Known headings
-    # --------------------------------------------------------
 
     for keyword in HEADING_KEYWORDS:
 
@@ -455,9 +416,7 @@ def is_heading(line):
         ):
             return True
 
-    # --------------------------------------------------------
     # Short ALL CAPS heading
-    # --------------------------------------------------------
 
     if (
         len(line.split()) <= 12
@@ -467,6 +426,7 @@ def is_heading(line):
             for ch in line
         )
     ):
+
         return True
 
     return False
@@ -530,20 +490,16 @@ def create_chunks(pages):
     for page_data in pages:
 
         page_text = page_data["text"]
-
         page_number = page_data["page"]
 
         lines = page_text.splitlines()
 
         current_heading = ""
-
         current_section = []
 
         sections = []
 
-        # ----------------------------------------------------
         # Detect sections
-        # ----------------------------------------------------
 
         for line in lines:
 
@@ -574,9 +530,7 @@ def create_chunks(pages):
                     line
                 )
 
-        # ----------------------------------------------------
         # Last section
-        # ----------------------------------------------------
 
         if current_section:
 
@@ -588,9 +542,7 @@ def create_chunks(pages):
                 "page": page_number
             })
 
-        # ----------------------------------------------------
-        # If no headings were found
-        # ----------------------------------------------------
+        # No headings
 
         if not sections:
 
@@ -600,9 +552,7 @@ def create_chunks(pages):
                 "page": page_number
             }]
 
-        # ----------------------------------------------------
         # Create chunks
-        # ----------------------------------------------------
 
         for section in sections:
 
@@ -617,9 +567,7 @@ def create_chunks(pages):
 
             words = text.split()
 
-            # ------------------------------------------------
             # Keep normal sections together
-            # ------------------------------------------------
 
             if len(words) <= 450:
 
@@ -634,14 +582,16 @@ def create_chunks(pages):
                     )
 
                 all_chunks.append({
+
                     "text": chunk_text,
+
                     "heading": heading,
+
                     "page": section["page"]
+
                 })
 
-            # ------------------------------------------------
             # Split large sections
-            # ------------------------------------------------
 
             else:
 
@@ -664,9 +614,13 @@ def create_chunks(pages):
                         )
 
                     all_chunks.append({
+
                         "text": chunk_text,
+
                         "heading": heading,
+
                         "page": section["page"]
+
                     })
 
     return all_chunks
@@ -680,9 +634,7 @@ def reset_document_storage():
 
     global collection
 
-    # --------------------------------------------------------
     # Delete uploaded files
-    # --------------------------------------------------------
 
     try:
 
@@ -695,21 +647,13 @@ def reset_document_storage():
                 filename
             )
 
-            if os.path.isfile(
-                file_path
-            ):
+            if os.path.isfile(file_path):
 
-                os.remove(
-                    file_path
-                )
+                os.remove(file_path)
 
-            elif os.path.isdir(
-                file_path
-            ):
+            elif os.path.isdir(file_path):
 
-                shutil.rmtree(
-                    file_path
-                )
+                shutil.rmtree(file_path)
 
     except Exception as e:
 
@@ -718,9 +662,7 @@ def reset_document_storage():
             e
         )
 
-    # --------------------------------------------------------
-    # Delete old Chroma collection
-    # --------------------------------------------------------
+    # Delete old collection
 
     try:
 
@@ -729,17 +671,20 @@ def reset_document_storage():
         )
 
     except Exception:
+
         pass
 
-    # --------------------------------------------------------
     # Create fresh collection
-    # --------------------------------------------------------
 
     collection = chroma_client.create_collection(
+
         name="current_document",
+
         metadata={
             "hnsw:space": "cosine"
-        }
+        },
+
+        embedding_function=embedding_function
     )
 
 
@@ -754,11 +699,9 @@ STOP_WORDS = {
     "are",
     "was",
     "were",
-
     "the",
     "a",
     "an",
-
     "of",
     "for",
     "to",
@@ -769,21 +712,18 @@ STOP_WORDS = {
     "with",
     "by",
     "from",
-
     "how",
     "why",
     "where",
     "when",
     "which",
     "who",
-
     "does",
     "do",
     "can",
     "could",
     "would",
     "should",
-
     "explain",
     "give",
     "tell",
@@ -791,11 +731,9 @@ STOP_WORDS = {
     "define",
     "definition",
     "describe",
-
     "main",
     "following",
     "following:",
-
     "please"
 }
 
@@ -821,9 +759,7 @@ def important_words(question):
         if word in STOP_WORDS:
             continue
 
-        result.append(
-            word
-        )
+        result.append(word)
 
     return result
 
@@ -925,12 +861,9 @@ def coverage_score(
     for word in words:
 
         if word in text_normalized:
-
             found += 1
 
-    return found / len(
-        words
-    )
+    return found / len(words)
 
 
 # ============================================================
@@ -1010,8 +943,11 @@ def heading_matches_query(
     heading_words = [
 
         word
+
         for word in h.split()
+
         if word not in STOP_WORDS
+
     ]
 
     if not heading_words:
@@ -1022,7 +958,6 @@ def heading_matches_query(
     for word in heading_words:
 
         if word in q:
-
             matched += 1
 
     return matched >= max(
@@ -1050,9 +985,7 @@ def retrieve_chunks(question):
         question
     )
 
-    # --------------------------------------------------------
     # Query variations
-    # --------------------------------------------------------
 
     query_variations = [
         question
@@ -1077,16 +1010,6 @@ def retrieve_chunks(question):
                 important_query
             )
 
-    # --------------------------------------------------------
-    # Semantic embeddings
-    # --------------------------------------------------------
-
-    embeddings = embedding_model.encode(
-        query_variations,
-        normalize_embeddings=True,
-        show_progress_bar=False
-    )
-
     results_map = {}
 
     total_chunks = collection.count()
@@ -1097,18 +1020,21 @@ def retrieve_chunks(question):
     )
 
     # --------------------------------------------------------
-    # Semantic search
+    # Semantic search using Chroma's built-in embeddings
     # --------------------------------------------------------
 
-    for embedding in embeddings:
+    for query_text in query_variations:
 
         try:
 
             results = collection.query(
-                query_embeddings=[
-                    embedding.tolist()
+
+                query_texts=[
+                    query_text
                 ],
+
                 n_results=search_count,
+
                 include=[
                     "documents",
                     "metadatas",
@@ -1145,23 +1071,37 @@ def retrieve_chunks(question):
         ):
 
             metadata = (
+
                 metadatas[index]
+
                 if index < len(metadatas)
+
                 else {}
+
             )
 
             distance = (
+
                 distances[index]
+
                 if index < len(distances)
+
                 else 1.0
+
             )
 
             similarity = max(
+
                 0.0,
+
                 min(
+
                     1.0,
+
                     1.0 - float(distance)
+
                 )
+
             )
 
             if document not in results_map:
@@ -1186,6 +1126,7 @@ def retrieve_chunks(question):
                     ),
 
                     "semantic": similarity
+
                 }
 
             else:
@@ -1199,18 +1140,17 @@ def retrieve_chunks(question):
                     ]["semantic"],
 
                     similarity
+
                 )
 
     # --------------------------------------------------------
     # EXACT KEYWORD SCAN
-    #
-    # This helps when semantic search misses an exact term
-    # such as SDN.
     # --------------------------------------------------------
 
     try:
 
         all_data = collection.get(
+
             include=[
                 "documents",
                 "metadatas"
@@ -1232,9 +1172,13 @@ def retrieve_chunks(question):
         ):
 
             metadata = (
+
                 all_metadatas[index]
+
                 if index < len(all_metadatas)
+
                 else {}
+
             )
 
             if document not in results_map:
@@ -1274,6 +1218,7 @@ def retrieve_chunks(question):
                         ),
 
                         "semantic": 0.0
+
                     }
 
     except Exception as e:
@@ -1284,7 +1229,7 @@ def retrieve_chunks(question):
         )
 
     # --------------------------------------------------------
-    # Score candidates
+    # SCORE CANDIDATES
     # --------------------------------------------------------
 
     candidates = []
@@ -1324,10 +1269,6 @@ def retrieve_chunks(question):
 
             heading_score = 1.0
 
-        # ----------------------------------------------------
-        # Hybrid score
-        # ----------------------------------------------------
-
         score = (
 
             semantic * 0.35
@@ -1339,6 +1280,7 @@ def retrieve_chunks(question):
             + c_score * 0.10
 
             + heading_score * 0.05
+
         )
 
         item["keyword"] = k_score
@@ -1351,9 +1293,7 @@ def retrieve_chunks(question):
 
         item["score"] = score
 
-        candidates.append(
-            item
-        )
+        candidates.append(item)
 
     if not candidates:
 
@@ -1364,7 +1304,7 @@ def retrieve_chunks(question):
         return []
 
     # --------------------------------------------------------
-    # Exact section priority
+    # EXACT SECTION PRIORITY
     # --------------------------------------------------------
 
     exact_section = extract_possible_section(
@@ -1405,7 +1345,7 @@ def retrieve_chunks(question):
             candidates = exact_candidates
 
     # --------------------------------------------------------
-    # Sort
+    # SORT
     # --------------------------------------------------------
 
     candidates.sort(
@@ -1423,6 +1363,7 @@ def retrieve_chunks(question):
             item["score"],
 
             item["semantic"]
+
         ),
 
         reverse=True
@@ -1454,6 +1395,7 @@ def retrieve_chunks(question):
 
             "| Heading:",
             item["heading"]
+
         )
 
     return candidates[:MAX_RESULTS]
@@ -1477,9 +1419,7 @@ def select_context(
         question
     )
 
-    # --------------------------------------------------------
     # First select exact section matches
-    # --------------------------------------------------------
 
     if exact_section:
 
@@ -1506,39 +1446,25 @@ def select_context(
 
                 if item not in selected:
 
-                    selected.append(
-                        item
-                    )
+                    selected.append(item)
 
-                if (
-                    len(selected)
-                    >= MAX_CONTEXT_CHUNKS
-                ):
+                if len(selected) >= MAX_CONTEXT_CHUNKS:
 
                     break
 
-    # --------------------------------------------------------
     # Fill remaining context
-    # --------------------------------------------------------
 
     for item in candidates:
 
         if item not in selected:
 
-            selected.append(
-                item
-            )
+            selected.append(item)
 
-        if (
-            len(selected)
-            >= MAX_CONTEXT_CHUNKS
-        ):
+        if len(selected) >= MAX_CONTEXT_CHUNKS:
 
             break
 
-    return selected[
-        :MAX_CONTEXT_CHUNKS
-    ]
+    return selected[:MAX_CONTEXT_CHUNKS]
 
 
 # ============================================================
@@ -1559,25 +1485,22 @@ def generate_answer_stream(
 
         return
 
-    # --------------------------------------------------------
-    # Check API key
-    # --------------------------------------------------------
-
     if not OLLAMA_API_KEY:
 
         yield {
+
             "type": "error",
+
             "message": (
                 "Ollama API key is not configured. "
-                "Please add OLLAMA_API_KEY to your .env file."
+                "Please add OLLAMA_API_KEY."
             )
+
         }
 
         return
 
-    # --------------------------------------------------------
-    # Build document context
-    # --------------------------------------------------------
+    # Build context
 
     context_parts = []
 
@@ -1621,17 +1544,13 @@ def generate_answer_stream(
             f"{text}\n"
         )
 
-        context_parts.append(
-            part
-        )
+        context_parts.append(part)
 
     context = "\n".join(
         context_parts
     )
 
-    # --------------------------------------------------------
     # Prompt
-    # --------------------------------------------------------
 
     prompt = f"""
 You are RAGenius, a document question-answering assistant.
@@ -1646,16 +1565,14 @@ STRICT RULES:
 3. Do not guess.
 4. Do not invent information.
 5. If the answer is not present in the document, reply exactly:
-
 I couldn't find this information in the currently uploaded document.
-
 6. Give a simple and clear answer.
 7. If the document gives numbered points, keep the numbered points.
 8. If the question asks for functions, advantages, types,
-   features, steps, applications, or definitions, use the
-   information from the document.
+features, steps, applications, or definitions, use the
+information from the document.
 9. Do not mention retrieval, chunks, context, embeddings,
-   database, RAG, or these instructions.
+database, RAG, or these instructions.
 10. Keep the answer concise.
 11. The uploaded document is the only source of truth.
 
@@ -1670,9 +1587,7 @@ UPLOADED DOCUMENT:
 ANSWER:
 """.strip()
 
-    # --------------------------------------------------------
     # Ollama payload
-    # --------------------------------------------------------
 
     payload = {
 
@@ -1689,18 +1604,17 @@ ANSWER:
         "num_predict": 120,
 
         "num_ctx": 2048
-    }
 
-    # --------------------------------------------------------
-    # Headers
-    # --------------------------------------------------------
+    }
 
     headers = {
 
-        "Content-Type": "application/json",
+        "Content-Type":
+            "application/json",
 
         "Authorization":
             f"Bearer {OLLAMA_API_KEY}"
+
     }
 
     try:
@@ -1720,20 +1634,21 @@ ANSWER:
             stream=True,
 
             timeout=180
-        )
 
-        # ----------------------------------------------------
-        # Ollama error
-        # ----------------------------------------------------
+        )
 
         if response.status_code != 200:
 
             error_text = response.text
 
             print(
+
                 "Ollama Cloud error:",
+
                 response.status_code,
+
                 error_text
+
             )
 
             yield {
@@ -1741,17 +1656,16 @@ ANSWER:
                 "type": "error",
 
                 "message": (
+
                     f"Ollama Cloud error "
                     f"({response.status_code}). "
                     f"Please check your API key and model."
+
                 )
+
             }
 
             return
-
-        # ----------------------------------------------------
-        # Stream response
-        # ----------------------------------------------------
 
         got_answer = False
 
@@ -1764,9 +1678,7 @@ ANSWER:
 
             try:
 
-                data = json.loads(
-                    line
-                )
+                data = json.loads(line)
 
             except Exception:
 
@@ -1786,6 +1698,7 @@ ANSWER:
                     "type": "token",
 
                     "content": token
+
                 }
 
             if data.get(
@@ -1795,10 +1708,6 @@ ANSWER:
 
                 break
 
-        # ----------------------------------------------------
-        # No answer received
-        # ----------------------------------------------------
-
         if not got_answer:
 
             yield {
@@ -1806,6 +1715,7 @@ ANSWER:
                 "type": "answer",
 
                 "content": NO_ANSWER
+
             }
 
     except requests.exceptions.Timeout:
@@ -1814,10 +1724,9 @@ ANSWER:
 
             "type": "error",
 
-            "message": (
-                "The AI service took too long "
-                "to respond."
-            )
+            "message":
+                "The AI service took too long to respond."
+
         }
 
     except requests.exceptions.ConnectionError:
@@ -1826,9 +1735,9 @@ ANSWER:
 
             "type": "error",
 
-            "message": (
+            "message":
                 "Could not connect to Ollama Cloud."
-            )
+
         }
 
     except Exception as e:
@@ -1842,10 +1751,9 @@ ANSWER:
 
             "type": "error",
 
-            "message": (
-                "An error occurred while generating "
-                "the answer."
-            )
+            "message":
+                "An error occurred while generating the answer."
+
         }
 
 
@@ -1885,15 +1793,15 @@ def upload_file():
 
     try:
 
-        # ----------------------------------------------------
-        # Check file
-        # ----------------------------------------------------
-
         if "file" not in request.files:
 
             return jsonify({
+
                 "success": False,
-                "error": "No file selected."
+
+                "error":
+                    "No file selected."
+
             }), 400
 
         file = request.files["file"]
@@ -1901,29 +1809,26 @@ def upload_file():
         if not file.filename:
 
             return jsonify({
-                "success": False,
-                "error": "No file selected."
-            }), 400
 
-        # ----------------------------------------------------
-        # Check extension
-        # ----------------------------------------------------
+                "success": False,
+
+                "error":
+                    "No file selected."
+
+            }), 400
 
         if not allowed_file(
             file.filename
         ):
 
             return jsonify({
-                "success": False,
-                "error": (
-                    "Only PDF and DOCX files "
-                    "are supported."
-                )
-            }), 400
 
-        # ----------------------------------------------------
-        # Check size
-        # ----------------------------------------------------
+                "success": False,
+
+                "error":
+                    "Only PDF and DOCX files are supported."
+
+            }), 400
 
         file.seek(
             0,
@@ -1937,21 +1842,17 @@ def upload_file():
         if file_size > MAX_FILE_SIZE:
 
             return jsonify({
+
                 "success": False,
-                "error": (
+
+                "error":
                     "File size must be less than 10 MB."
-                )
+
             }), 400
 
-        # ----------------------------------------------------
-        # New upload replaces old document
-        # ----------------------------------------------------
+        # New document replaces old one
 
         reset_document_storage()
-
-        # ----------------------------------------------------
-        # Save file
-        # ----------------------------------------------------
 
         safe_filename = os.path.basename(
             file.filename
@@ -1962,18 +1863,14 @@ def upload_file():
             safe_filename
         )
 
-        file.save(
-            file_path
-        )
+        file.save(file_path)
 
         print(
             "Uploaded:",
             safe_filename
         )
 
-        # ----------------------------------------------------
-        # Extract document
-        # ----------------------------------------------------
+        # Extract
 
         pages = extract_document(
             file_path
@@ -1982,16 +1879,15 @@ def upload_file():
         if not pages:
 
             return jsonify({
+
                 "success": False,
-                "error": (
-                    "Could not extract text "
-                    "from the uploaded document."
-                )
+
+                "error":
+                    "Could not extract text from the uploaded document."
+
             }), 400
 
-        # ----------------------------------------------------
         # Create chunks
-        # ----------------------------------------------------
 
         chunks = create_chunks(
             pages
@@ -2000,11 +1896,12 @@ def upload_file():
         if not chunks:
 
             return jsonify({
+
                 "success": False,
-                "error": (
-                    "No readable text was found "
-                    "in the document."
-                )
+
+                "error":
+                    "No readable text was found in the document."
+
             }), 400
 
         print(
@@ -2013,7 +1910,10 @@ def upload_file():
         )
 
         # ----------------------------------------------------
-        # Create embeddings
+        # Store documents in Chroma.
+        #
+        # Chroma now creates embeddings automatically.
+        # No SentenceTransformer/PyTorch is loaded.
         # ----------------------------------------------------
 
         texts = [
@@ -2021,20 +1921,8 @@ def upload_file():
             chunk["text"]
 
             for chunk in chunks
+
         ]
-
-        embeddings = embedding_model.encode(
-
-            texts,
-
-            normalize_embeddings=True,
-
-            show_progress_bar=False
-        )
-
-        # ----------------------------------------------------
-        # IDs + metadata
-        # ----------------------------------------------------
 
         ids = []
 
@@ -2066,11 +1954,8 @@ def upload_file():
 
                 "filename":
                     safe_filename
-            })
 
-        # ----------------------------------------------------
-        # Store in Chroma
-        # ----------------------------------------------------
+            })
 
         collection.add(
 
@@ -2078,12 +1963,8 @@ def upload_file():
 
             documents=texts,
 
-            embeddings=[
-                embedding.tolist()
-                for embedding in embeddings
-            ],
-
             metadatas=metadatas
+
         )
 
         print(
@@ -2103,6 +1984,7 @@ def upload_file():
 
             "chunks":
                 len(chunks)
+
         })
 
     except Exception as e:
@@ -2118,6 +2000,7 @@ def upload_file():
 
             "error":
                 str(e)
+
         }), 500
 
 
@@ -2140,7 +2023,10 @@ def query():
         if not data:
 
             return jsonify({
-                "answer": NO_ANSWER
+
+                "answer":
+                    NO_ANSWER
+
             }), 400
 
         question = str(
@@ -2153,13 +2039,11 @@ def query():
         if not question:
 
             return jsonify({
+
                 "answer":
                     "Please enter a question."
-            }), 400
 
-        # ----------------------------------------------------
-        # Check collection
-        # ----------------------------------------------------
+            }), 400
 
         document_count = collection.count()
 
@@ -2171,12 +2055,13 @@ def query():
         if document_count == 0:
 
             return jsonify({
-                "answer": NO_ANSWER
+
+                "answer":
+                    NO_ANSWER
+
             })
 
-        # ----------------------------------------------------
         # Retrieve
-        # ----------------------------------------------------
 
         candidates = retrieve_chunks(
             question
@@ -2185,24 +2070,26 @@ def query():
         if not candidates:
 
             return jsonify({
-                "answer": NO_ANSWER
+
+                "answer":
+                    NO_ANSWER
+
             })
 
-        # ----------------------------------------------------
         # Select context
-        # ----------------------------------------------------
 
         context_chunks = select_context(
-
             question,
-
             candidates
         )
 
         if not context_chunks:
 
             return jsonify({
-                "answer": NO_ANSWER
+
+                "answer":
+                    NO_ANSWER
+
             })
 
         print(
@@ -2210,9 +2097,7 @@ def query():
             len(context_chunks)
         )
 
-        # ----------------------------------------------------
         # Source information
-        # ----------------------------------------------------
 
         filename = ""
 
@@ -2234,19 +2119,13 @@ def query():
 
             if page:
 
-                pages.append(
-                    page
-                )
+                pages.append(page)
 
         pages = sorted(
-            list(
-                set(pages)
-            )
+            list(set(pages))
         )
 
-        # ----------------------------------------------------
         # Streaming response
-        # ----------------------------------------------------
 
         def generate():
 
@@ -2257,6 +2136,7 @@ def query():
 
                 "pages":
                     pages
+
             }
 
             yield (
@@ -2272,6 +2152,7 @@ def query():
                 })
 
                 + "\n"
+
             )
 
             for item in generate_answer_stream(
@@ -2279,6 +2160,7 @@ def query():
                 question,
 
                 context_chunks
+
             ):
 
                 yield (
@@ -2286,6 +2168,7 @@ def query():
                     json.dumps(item)
 
                     + "\n"
+
                 )
 
         return Response(
@@ -2296,6 +2179,7 @@ def query():
 
             mimetype=
                 "application/x-ndjson"
+
         )
 
     except Exception as e:
@@ -2308,8 +2192,7 @@ def query():
         return jsonify({
 
             "answer":
-                "An error occurred while "
-                "processing your question."
+                "An error occurred while processing your question."
 
         }), 500
 
@@ -2334,6 +2217,7 @@ def health():
 
         "ollama_key_configured":
             bool(OLLAMA_API_KEY)
+
     })
 
 
@@ -2355,4 +2239,5 @@ if __name__ == "__main__":
         ),
 
         debug=False
+
     )

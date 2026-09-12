@@ -4,6 +4,5 @@ requests
 PyMuPDF
 python-docx
 chromadb
-sentence-transformers
-torch
+onnxruntime
 python-dotenv
