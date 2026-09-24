@@ -1,8 +1,10 @@
 from flask import Flask, render_template, request, jsonify
+
 import os
 import re
 import shutil
-import fitz
+import pymupdf as fitz
+
 from docx import Document
 from difflib import SequenceMatcher
 
@@ -15,7 +17,17 @@ app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+# ------------------------------------------------------------
+# VERCEL FIX
+# Vercel's project filesystem is read-only.
+# /tmp is the writable temporary directory.
+# Locally, continue using the normal uploads folder.
+# ------------------------------------------------------------
+
+if os.environ.get("VERCEL"):
+    UPLOAD_FOLDER = "/tmp/ragenius_uploads"
+else:
+    UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
@@ -77,7 +89,6 @@ def normalize_text(text):
     text = text.replace("&", " and ")
 
     text = re.sub(r"[^a-z0-9\s]", " ", text)
-
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
@@ -144,7 +155,6 @@ def question_topic(question):
     """
 
     text = clean_text(question)
-
     text = text.rstrip(" ?!:")
 
     lower = text.lower()
@@ -181,10 +191,12 @@ def remove_number_prefix(text):
     2)
     """
 
+    text = clean_text(text)
+
     return re.sub(
-        r"^\s*\d+(?:\.\d+)*[\.\)]?\s*",
+        r"^\s*\d+(?:\.\d+)*[.)]?\s+",
         "",
-        clean_text(text)
+        text
     ).strip()
 
 
@@ -201,13 +213,13 @@ def remove_letter_prefix(text):
     text = clean_text(text)
 
     text = re.sub(
-        r"^\s*\([A-Za-z0-9]+\)\s*",
+        r"^\s*\([A-Za-z0-9]+\)\s+",
         "",
         text
     )
 
     text = re.sub(
-        r"^\s*[A-Za-z][\.\)]\s*",
+        r"^\s*[A-Za-z][.)]\s+",
         "",
         text
     )
@@ -298,7 +310,7 @@ def numbered_heading_info(text):
 
     # a. Definition
     if re.match(
-        r"^\s*[A-Za-z][\.\)]\s+.+",
+        r"^\s*[A-Za-z][.)]\s+.+",
         text
     ):
         return True, 2
@@ -329,7 +341,8 @@ def is_all_caps_heading(text):
         return False
 
     upper = sum(
-        1 for char in letters
+        1
+        for char in letters
         if char.isupper()
     )
 
@@ -398,7 +411,6 @@ def looks_like_title(text):
     if len(words) > 12:
         return False
 
-    # Avoid ordinary sentence-like paragraphs
     sentence_words = {
         "the",
         "this",
@@ -439,11 +451,9 @@ def looks_like_title(text):
     if len(words) >= 6 and sentence_word_count >= 2:
         return False
 
-    # Title case signal
     title_case_count = 0
 
     for word in words:
-
         word_clean = re.sub(
             r"[^A-Za-z]",
             "",
@@ -483,10 +493,7 @@ def generic_heading_detection(
 
     style_name = style_name.lower()
 
-    # --------------------------------------------------------
     # Word heading styles
-    # --------------------------------------------------------
-
     match = re.search(
         r"heading\s*(\d+)",
         style_name
@@ -501,42 +508,26 @@ def generic_heading_detection(
     if "subtitle" in style_name:
         return True, 2
 
-    # --------------------------------------------------------
     # Numbered headings
-    # --------------------------------------------------------
-
     numbered, level = numbered_heading_info(text)
 
     if numbered:
         return True, level
 
-    # --------------------------------------------------------
     # Strong bold short paragraph
-    # --------------------------------------------------------
-
     if bold_ratio >= 0.75:
-
         if len(text.split()) <= 15:
             return True, 2
 
-    # --------------------------------------------------------
     # ALL CAPS
-    # --------------------------------------------------------
-
     if is_all_caps_heading(text):
         return True, 1
 
-    # --------------------------------------------------------
     # Short colon heading
-    # --------------------------------------------------------
-
     if is_colon_heading(text):
         return True, 2
 
-    # --------------------------------------------------------
     # Title-like heading
-    # --------------------------------------------------------
-
     if looks_like_title(text):
         return True, 2
 
@@ -581,7 +572,6 @@ def parse_inline_item(text):
     if not left or not right:
         return None
 
-    # A label should normally be short
     if len(left.split()) > 12:
         return None
 
@@ -658,7 +648,6 @@ def reset_document():
 
 
 def clear_upload_folder():
-
     os.makedirs(
         UPLOAD_FOLDER,
         exist_ok=True
@@ -667,14 +656,12 @@ def clear_upload_folder():
     for name in os.listdir(
         UPLOAD_FOLDER
     ):
-
         path = os.path.join(
             UPLOAD_FOLDER,
             name
         )
 
         try:
-
             if os.path.isfile(path):
                 os.remove(path)
 
@@ -694,7 +681,6 @@ def clear_upload_folder():
 # ============================================================
 
 def extract_pdf(path):
-
     pages = []
     blocks = []
     lines = []
@@ -702,12 +688,10 @@ def extract_pdf(path):
     document = fitz.open(path)
 
     try:
-
         for page_number, page in enumerate(
             document,
             start=1
         ):
-
             page_blocks = page.get_text(
                 "blocks"
             )
@@ -715,7 +699,6 @@ def extract_pdf(path):
             page_lines = []
 
             for block in page_blocks:
-
                 if len(block) < 5:
                     continue
 
@@ -736,25 +719,17 @@ def extract_pdf(path):
                 if not text:
                     continue
 
-                page_lines.append(
-                    text
-                )
+                page_lines.append(text)
 
                 blocks.append({
                     "page": page_number,
                     "text": text
                 })
 
-                # ------------------------------------------------
-                # IMPORTANT:
-                # Preserve ALL lines from PDF blocks.
-                # Do not truncate them.
-                # ------------------------------------------------
-
+                # Preserve ALL lines from PDF blocks
                 for one_line in text.split(
                     "\n"
                 ):
-
                     one_line = clean_text(
                         one_line
                     )
@@ -769,26 +744,18 @@ def extract_pdf(path):
 
             pages.append({
                 "page": page_number,
-                "text": "\n".join(
-                    page_lines
-                )
+                "text": "\n".join(page_lines)
             })
 
     finally:
         document.close()
 
-    # ------------------------------------------------------------
     # Generic PDF heading detection
-    # ------------------------------------------------------------
-
     for line in lines:
-
         text = line["text"]
 
         heading, level = (
-            generic_heading_detection(
-                text
-            )
+            generic_heading_detection(text)
         )
 
         line["heading"] = heading
@@ -806,19 +773,14 @@ def extract_pdf(path):
 # ============================================================
 
 def extract_docx(path):
-
     pages = []
     blocks = []
     lines = []
 
     document = Document(path)
 
-    # --------------------------------------------------------
     # Paragraphs
-    # --------------------------------------------------------
-
     for paragraph in document.paragraphs:
-
         text = clean_text(
             paragraph.text
         )
@@ -846,33 +808,23 @@ def extract_docx(path):
             "heading_level": level
         })
 
-    # --------------------------------------------------------
     # Tables
-    # --------------------------------------------------------
-
     for table in document.tables:
-
         for row in table.rows:
-
             cells = []
 
             for cell in row.cells:
-
                 cell_text = clean_text(
                     cell.text
                 )
 
                 if cell_text:
-                    cells.append(
-                        cell_text
-                    )
+                    cells.append(cell_text)
 
             if not cells:
                 continue
 
-            row_text = " | ".join(
-                cells
-            )
+            row_text = " | ".join(cells)
 
             blocks.append({
                 "page": 1,
@@ -908,17 +860,12 @@ def extract_docx(path):
 # ============================================================
 
 def build_sections(lines):
-
     sections = []
 
     stack = []
-
     current_section = None
 
-    for index, line in enumerate(
-        lines
-    ):
-
+    for index, line in enumerate(lines):
         text = clean_text(
             line.get("text", "")
         )
@@ -935,29 +882,20 @@ def build_sections(lines):
             "heading_level"
         )
 
-        # ----------------------------------------------------
         # HEADING
-        # ----------------------------------------------------
-
         if is_heading:
-
             if level is None:
                 level = 2
 
             # Save old section
             if current_section:
-
                 answer = clean_text(
                     "\n".join(
-                        current_section[
-                            "content"
-                        ]
+                        current_section["content"]
                     )
                 )
 
-                current_section[
-                    "answer"
-                ] = answer
+                current_section["answer"] = answer
 
                 if answer:
                     sections.append(
@@ -965,9 +903,7 @@ def build_sections(lines):
                     )
 
             # Remove deeper hierarchy
-            while stack and stack[-1][
-                "level"
-            ] >= level:
+            while stack and stack[-1]["level"] >= level:
                 stack.pop()
 
             parent = (
@@ -977,15 +913,10 @@ def build_sections(lines):
             )
 
             section = {
-                "label": clean_label(
-                    text
-                ),
+                "label": clean_label(text),
                 "raw_label": text,
                 "level": level,
-                "page": line.get(
-                    "page",
-                    1
-                ),
+                "page": line.get("page", 1),
                 "line_index": index,
                 "content": [],
                 "answer": "",
@@ -996,53 +927,35 @@ def build_sections(lines):
                 )
             }
 
-            stack.append(
-                section
-            )
-
+            stack.append(section)
             current_section = section
 
             continue
 
-        # ----------------------------------------------------
         # NORMAL CONTENT
-        # ----------------------------------------------------
-
         if current_section is None:
-
-            # Document text before first heading
             current_section = {
                 "label": "",
                 "raw_label": "",
                 "level": 99,
-                "page": line.get(
-                    "page",
-                    1
-                ),
+                "page": line.get("page", 1),
                 "line_index": index,
                 "content": [],
                 "answer": "",
                 "parent": ""
             }
 
-        current_section[
-            "content"
-        ].append(text)
+        current_section["content"].append(text)
 
     # Save final section
     if current_section:
-
         answer = clean_text(
             "\n".join(
-                current_section[
-                    "content"
-                ]
+                current_section["content"]
             )
         )
 
-        current_section[
-            "answer"
-        ] = answer
+        current_section["answer"] = answer
 
         if answer:
             sections.append(
@@ -1057,7 +970,6 @@ def build_sections(lines):
 # ============================================================
 
 def build_items(lines):
-
     items = []
 
     current_heading = ""
@@ -1067,7 +979,6 @@ def build_items(lines):
     pending = None
 
     def save_pending():
-
         nonlocal pending
 
         if not pending:
@@ -1080,18 +991,11 @@ def build_items(lines):
         )
 
         if answer:
-
             items.append({
-                "label": pending[
-                    "label"
-                ],
+                "label": pending["label"],
                 "answer": answer,
-                "page": pending[
-                    "page"
-                ],
-                "line_index": pending[
-                    "line_index"
-                ],
+                "page": pending["page"],
+                "line_index": pending["line_index"],
                 "heading": current_heading,
                 "heading_level": current_level,
                 "parent": current_parent
@@ -1099,10 +1003,7 @@ def build_items(lines):
 
         pending = None
 
-    for index, line in enumerate(
-        lines
-    ):
-
+    for index, line in enumerate(lines):
         text = clean_text(
             line.get("text", "")
         )
@@ -1110,33 +1011,21 @@ def build_items(lines):
         if not text:
             continue
 
-        # ----------------------------------------------------
         # NEW HEADING
-        # ----------------------------------------------------
-
-        if line.get(
-            "heading",
-            False
-        ):
-
+        if line.get("heading", False):
             save_pending()
 
-            current_heading = clean_label(
-                text
-            )
+            current_heading = clean_label(text)
 
             current_level = line.get(
                 "heading_level",
                 2
             )
 
-            # Find nearest previous parent heading
             current_parent = ""
 
-            for previous in reversed(
-                items
-            ):
-
+            # Find nearest previous parent heading
+            for previous in reversed(items):
                 previous_heading = clean_text(
                     previous.get(
                         "heading",
@@ -1151,44 +1040,28 @@ def build_items(lines):
 
                 if (
                     previous_heading
-                    and previous_level
-                    < current_level
+                    and previous_level < current_level
                 ):
-
-                    current_parent = (
-                        previous_heading
-                    )
-
+                    current_parent = previous_heading
                     break
 
             continue
 
-        # ----------------------------------------------------
         # BULLET
-        # ----------------------------------------------------
-
         if is_bullet(text):
-
             save_pending()
 
-            cleaned = remove_bullet_marker(
-                text
-            )
+            cleaned = remove_bullet_marker(text)
 
             inline = parse_inline_item(
                 cleaned
             )
 
             if inline:
-
                 pending = {
-                    "label": inline[
-                        "label"
-                    ],
+                    "label": inline["label"],
                     "parts": [
-                        inline[
-                            "answer"
-                        ]
+                        inline["answer"]
                     ],
                     "page": line.get(
                         "page",
@@ -1198,7 +1071,6 @@ def build_items(lines):
                 }
 
             else:
-
                 pending = {
                     "label": "",
                     "parts": [cleaned],
@@ -1211,26 +1083,16 @@ def build_items(lines):
 
             continue
 
-        # ----------------------------------------------------
         # INLINE LABEL: ANSWER
-        # ----------------------------------------------------
-
-        inline = parse_inline_item(
-            text
-        )
+        inline = parse_inline_item(text)
 
         if inline:
-
             save_pending()
 
             pending = {
-                "label": inline[
-                    "label"
-                ],
+                "label": inline["label"],
                 "parts": [
-                    inline[
-                        "answer"
-                    ]
+                    inline["answer"]
                 ],
                 "page": line.get(
                     "page",
@@ -1241,18 +1103,11 @@ def build_items(lines):
 
             continue
 
-        # ----------------------------------------------------
         # CONTINUATION
-        # ----------------------------------------------------
-
         if pending:
-
-            pending[
-                "parts"
-            ].append(text)
+            pending["parts"].append(text)
 
         else:
-
             # Normal paragraph
             items.append({
                 "label": "",
@@ -1285,10 +1140,7 @@ def build_items(lines):
 # ADD SECTION ITEMS
 # ============================================================
 
-def add_section_items(
-    items,
-    sections
-):
+def add_section_items(items, sections):
     """
     Creates searchable entries for complete
     document sections.
@@ -1299,7 +1151,6 @@ def add_section_items(
     result = list(items)
 
     for section in sections:
-
         label = clean_text(
             section.get(
                 "label",
@@ -1317,15 +1168,11 @@ def add_section_items(
         if not label or not answer:
             continue
 
-        normalized = normalize_text(
-            label
-        )
+        normalized = normalize_text(label)
 
-        # Find same label + same parent
         found = False
 
         for item in result:
-
             item_label = normalize_text(
                 item.get(
                     "label",
@@ -1349,11 +1196,8 @@ def add_section_items(
 
             if (
                 item_label == normalized
-                and item_parent
-                == section_parent
+                and item_parent == section_parent
             ):
-
-                # Keep the more complete answer
                 if len(answer) > len(
                     clean_text(
                         item.get(
@@ -1362,14 +1206,12 @@ def add_section_items(
                         )
                     )
                 ):
-
                     item["answer"] = answer
 
                 found = True
                 break
 
         if not found:
-
             result.append({
                 "label": label,
                 "answer": answer,
@@ -1437,10 +1279,7 @@ STOP_WORDS = {
 
 
 def tokens(text):
-
-    words = normalize_text(
-        text
-    ).split()
+    words = normalize_text(text).split()
 
     return {
         word
@@ -1453,7 +1292,6 @@ def tokens(text):
 
 
 def similarity(a, b):
-
     a = normalize_text(a)
     b = normalize_text(b)
 
@@ -1468,7 +1306,6 @@ def similarity(a, b):
 
 
 def overlap_score(a, b):
-
     a_tokens = tokens(a)
     b_tokens = tokens(b)
 
@@ -1481,7 +1318,6 @@ def overlap_score(a, b):
 
 
 def exact_match(a, b):
-
     return (
         normalize_text(a)
         ==
@@ -1494,20 +1330,14 @@ def exact_match(a, b):
 # ============================================================
 
 def find_exact_heading(question):
-
-    topic = question_topic(
-        question
-    )
+    topic = question_topic(question)
 
     if not topic:
         return None
 
     matches = []
 
-    for item in current_document[
-        "items"
-    ]:
-
+    for item in current_document["items"]:
         label = clean_text(
             item.get(
                 "label",
@@ -1525,26 +1355,11 @@ def find_exact_heading(question):
         if not label or not answer:
             continue
 
-        if exact_match(
-            topic,
-            label
-        ):
-
-            matches.append(
-                item
-            )
+        if exact_match(topic, label):
+            matches.append(item)
 
     if not matches:
         return None
-
-    # --------------------------------------------------------
-    # If duplicate labels exist, prefer the one with:
-    #
-    # 1. More specific hierarchy
-    # 2. Longer complete answer
-    #
-    # This is still entirely document-based.
-    # --------------------------------------------------------
 
     matches.sort(
         key=lambda item: (
@@ -1592,24 +1407,20 @@ def find_exact_heading(question):
 # ============================================================
 
 def find_heading_contains(question):
-
-    topic = question_topic(
-        question
-    )
+    topic = question_topic(question)
 
     if not topic:
         return None
 
-    topic_norm = normalize_text(
-        topic
-    )
+    topic_norm = normalize_text(topic)
+    topic_tokens = tokens(topic)
+
+    if not topic_tokens:
+        return None
 
     candidates = []
 
-    for item in current_document[
-        "items"
-    ]:
-
+    for item in current_document["items"]:
         label = clean_text(
             item.get(
                 "label",
@@ -1627,47 +1438,85 @@ def find_heading_contains(question):
         if not label or not answer:
             continue
 
-        label_norm = normalize_text(
-            label
+        label_norm = normalize_text(label)
+        label_tokens = tokens(label)
+
+        if not label_tokens:
+            continue
+
+        # Whole phrase containment
+        phrase_match = (
+            topic_norm in label_norm
         )
 
-        if (
-            topic_norm in label_norm
-            or label_norm in topic_norm
-        ):
-
-            candidates.append(
-                item
+        # Query token coverage inside heading
+        token_coverage = (
+            len(
+                topic_tokens & label_tokens
             )
+            /
+            len(topic_tokens)
+        )
+
+        # Only accept meaningful matches.
+        #
+        # This prevents:
+        # "surface finish"
+        #
+        # from incorrectly matching:
+        # "improved surface finish and accuracy"
+        #
+        # unless enough of the query is represented.
+        if phrase_match and token_coverage >= 0.80:
+            score = (
+                850
+                + token_coverage * 100
+                + min(len(label_tokens), 20)
+            )
+
+            candidates.append({
+                "score": score,
+                "item": item
+            })
+
+        elif (
+            label_norm in topic_norm
+            and token_coverage >= 0.80
+        ):
+            score = (
+                820
+                + token_coverage * 100
+            )
+
+            candidates.append({
+                "score": score,
+                "item": item
+            })
 
     if not candidates:
         return None
 
-    # Require meaningful containment
     candidates.sort(
-        key=lambda item: (
-            len(
-                normalize_text(
-                    item.get(
-                        "label",
-                        ""
-                    )
-                )
-            ),
-            -len(
-                item.get(
-                    "answer",
-                    ""
-                )
-            )
-        )
+        key=lambda x: x["score"],
+        reverse=True
     )
 
-    best = candidates[0]
+    # Do not guess when candidates are too close
+    if len(candidates) > 1:
+        difference = (
+            candidates[0]["score"]
+            -
+            candidates[1]["score"]
+        )
+
+        if difference < 5:
+            return None
+
+    best = candidates[0]["item"]
 
     return {
         "type": "heading_contains",
-        "score": 900,
+        "score": candidates[0]["score"],
         "page": best.get(
             "page",
             1
@@ -1692,20 +1541,14 @@ def find_heading_contains(question):
 # ============================================================
 
 def find_similar_heading(question):
-
-    topic = question_topic(
-        question
-    )
+    topic = question_topic(question)
 
     if not topic:
         return None
 
     candidates = []
 
-    for item in current_document[
-        "items"
-    ]:
-
+    for item in current_document["items"]:
         label = clean_text(
             item.get(
                 "label",
@@ -1737,7 +1580,6 @@ def find_similar_heading(question):
             sim >= 0.90
             and overlap >= 0.65
         ):
-
             score = (
                 sim * 100
                 +
@@ -1757,14 +1599,7 @@ def find_similar_heading(question):
         reverse=True
     )
 
-    # --------------------------------------------------------
-    # Important:
-    # If two candidates are almost equally good,
-    # DO NOT GUESS.
-    # --------------------------------------------------------
-
     if len(candidates) > 1:
-
         difference = (
             candidates[0]["score"]
             -
@@ -1778,9 +1613,7 @@ def find_similar_heading(question):
 
     return {
         "type": "similar_heading",
-        "score": candidates[0][
-            "score"
-        ],
+        "score": candidates[0]["score"],
         "page": best.get(
             "page",
             1
@@ -1805,27 +1638,19 @@ def find_similar_heading(question):
 # ============================================================
 
 def lexical_search(question):
-
-    topic = question_topic(
-        question
-    )
+    topic = question_topic(question)
 
     if not topic:
         return None
 
-    query_tokens = tokens(
-        topic
-    )
+    query_tokens = tokens(topic)
 
     if not query_tokens:
         return None
 
     candidates = []
 
-    for item in current_document[
-        "items"
-    ]:
-
+    for item in current_document["items"]:
         label = clean_text(
             item.get(
                 "label",
@@ -1843,20 +1668,13 @@ def lexical_search(question):
         if not answer:
             continue
 
-        label_tokens = tokens(
-            label
-        )
-
-        answer_tokens = tokens(
-            answer
-        )
+        label_tokens = tokens(label)
+        answer_tokens = tokens(answer)
 
         label_overlap = 0
-
         answer_overlap = 0
 
         if query_tokens:
-
             label_overlap = (
                 len(
                     query_tokens
@@ -1877,22 +1695,16 @@ def lexical_search(question):
                 len(query_tokens)
             )
 
-        # Label match is much stronger
         score = (
             label_overlap * 100
             +
             answer_overlap * 30
         )
 
-        if normalize_text(
-            topic
-        ) in normalize_text(
-            label
-        ):
+        if normalize_text(topic) in normalize_text(label):
             score += 100
 
         if score > 0:
-
             candidates.append({
                 "score": score,
                 "item": item
@@ -1906,28 +1718,15 @@ def lexical_search(question):
         reverse=True
     )
 
-    best_score = candidates[0][
-        "score"
-    ]
-
-    # --------------------------------------------------------
-    # Strict confidence check
-    # --------------------------------------------------------
+    best_score = candidates[0]["score"]
 
     if best_score < 55:
         return None
 
-    # Avoid random answer when candidates are too close
     if len(candidates) > 1:
+        second_score = candidates[1]["score"]
 
-        second_score = candidates[1][
-            "score"
-        ]
-
-        if (
-            best_score - second_score
-            < 8
-        ):
+        if best_score - second_score < 8:
             return None
 
     best = candidates[0]["item"]
@@ -1958,23 +1757,15 @@ def lexical_search(question):
 # SECTION RETRIEVAL
 # ============================================================
 
-def retrieve_matching_section(
-    question
-):
-
-    topic = question_topic(
-        question
-    )
+def retrieve_matching_section(question):
+    topic = question_topic(question)
 
     if not topic:
         return None
 
     candidates = []
 
-    for section in current_document[
-        "sections"
-    ]:
-
+    for section in current_document["sections"]:
         label = clean_text(
             section.get(
                 "label",
@@ -2006,7 +1797,6 @@ def retrieve_matching_section(
             sim >= 0.90
             and overlap >= 0.65
         ):
-
             score = (
                 sim * 80
                 +
@@ -2027,7 +1817,6 @@ def retrieve_matching_section(
     )
 
     if len(candidates) > 1:
-
         if (
             candidates[0]["score"]
             -
@@ -2040,9 +1829,7 @@ def retrieve_matching_section(
 
     return {
         "type": "section",
-        "score": candidates[0][
-            "score"
-        ],
+        "score": candidates[0]["score"],
         "page": best.get(
             "page",
             1
@@ -2067,11 +1854,7 @@ def retrieve_matching_section(
 # ============================================================
 
 def retrieve_answer(question):
-
-    if not current_document[
-        "filename"
-    ]:
-
+    if not current_document["filename"]:
         return {
             "type": "none",
             "score": 0,
@@ -2080,65 +1863,37 @@ def retrieve_answer(question):
             "answer": NOT_FOUND
         }
 
-    # --------------------------------------------------------
     # 1. Exact heading
-    # --------------------------------------------------------
-
-    result = find_exact_heading(
-        question
-    )
+    result = find_exact_heading(question)
 
     if result:
         return result
 
-    # --------------------------------------------------------
     # 2. Strong heading containment
-    # --------------------------------------------------------
-
-    result = find_heading_contains(
-        question
-    )
+    result = find_heading_contains(question)
 
     if result:
         return result
 
-    # --------------------------------------------------------
     # 3. High confidence fuzzy heading
-    # --------------------------------------------------------
-
-    result = find_similar_heading(
-        question
-    )
+    result = find_similar_heading(question)
 
     if result:
         return result
 
-    # --------------------------------------------------------
     # 4. Strong lexical search
-    # --------------------------------------------------------
-
-    result = lexical_search(
-        question
-    )
+    result = lexical_search(question)
 
     if result:
         return result
 
-    # --------------------------------------------------------
     # 5. Section search
-    # --------------------------------------------------------
-
-    result = retrieve_matching_section(
-        question
-    )
+    result = retrieve_matching_section(question)
 
     if result:
         return result
 
-    # --------------------------------------------------------
     # 6. NOT FOUND
-    # --------------------------------------------------------
-
     return {
         "type": "none",
         "score": 0,
@@ -2179,21 +1934,14 @@ def dashboard():
     methods=["POST"]
 )
 def upload_file():
-
     global current_document
 
-    file = request.files.get(
-        "file"
-    )
+    file = request.files.get("file")
 
     if file is None:
-
-        file = request.files.get(
-            "document"
-        )
+        file = request.files.get("document")
 
     if not file or not file.filename:
-
         return jsonify({
             "success": False,
             "message": "No file selected."
@@ -2206,7 +1954,6 @@ def upload_file():
     extension = ""
 
     if "." in filename:
-
         extension = (
             filename
             .rsplit(
@@ -2217,7 +1964,6 @@ def upload_file():
         )
 
     if extension not in ALLOWED_EXTENSIONS:
-
         return jsonify({
             "success": False,
             "message": (
@@ -2226,12 +1972,10 @@ def upload_file():
         }), 400
 
     # --------------------------------------------------------
-    # IMPORTANT:
     # COMPLETELY REMOVE OLD DOCUMENT
     # --------------------------------------------------------
 
     reset_document()
-
     clear_upload_folder()
 
     # --------------------------------------------------------
@@ -2250,29 +1994,20 @@ def upload_file():
     )
 
     try:
-
-        file.save(
-            filepath
-        )
+        file.save(filepath)
 
         # ----------------------------------------------------
         # EXTRACT
         # ----------------------------------------------------
 
         if extension == "pdf":
-
-            pages, blocks, lines = (
-                extract_pdf(
-                    filepath
-                )
+            pages, blocks, lines = extract_pdf(
+                filepath
             )
 
         else:
-
-            pages, blocks, lines = (
-                extract_docx(
-                    filepath
-                )
+            pages, blocks, lines = extract_docx(
+                filepath
             )
 
         # ----------------------------------------------------
@@ -2313,26 +2048,32 @@ def upload_file():
         print("\n================================")
         print("NEW DOCUMENT LOADED")
         print("================================")
+
         print(
             "Filename:",
             filename
         )
+
         print(
             "Type:",
             extension
         )
+
         print(
             "Pages:",
             len(pages)
         )
+
         print(
             "Lines:",
             len(lines)
         )
+
         print(
             "Sections:",
             len(sections)
         )
+
         print(
             "Items:",
             len(items)
@@ -2341,7 +2082,6 @@ def upload_file():
         print("\nDETECTED SECTIONS:")
 
         for section in sections:
-
             print(
                 f"  LEVEL {section.get('level')}: "
                 f"{section.get('label')}"
@@ -2364,7 +2104,6 @@ def upload_file():
         })
 
     except Exception as error:
-
         print(
             "DOCUMENT PROCESSING ERROR:",
             error
@@ -2373,14 +2112,8 @@ def upload_file():
         reset_document()
 
         try:
-
-            if os.path.exists(
-                filepath
-            ):
-                os.remove(
-                    filepath
-                )
-
+            if os.path.exists(filepath):
+                os.remove(filepath)
         except Exception:
             pass
 
@@ -2402,10 +2135,7 @@ def upload_file():
 )
 def query_document():
 
-    if not current_document[
-        "filename"
-    ]:
-
+    if not current_document["filename"]:
         return jsonify({
             "answer": NOT_FOUND,
             "source": {
@@ -2421,13 +2151,10 @@ def query_document():
     )
 
     if not data:
-
         return jsonify({
             "answer": NOT_FOUND,
             "source": {
-                "filename": current_document[
-                    "filename"
-                ],
+                "filename": current_document["filename"],
                 "page": None,
                 "type": "none",
                 "label": ""
@@ -2442,13 +2169,10 @@ def query_document():
     )
 
     if not question:
-
         return jsonify({
             "answer": NOT_FOUND,
             "source": {
-                "filename": current_document[
-                    "filename"
-                ],
+                "filename": current_document["filename"],
                 "page": None,
                 "type": "none",
                 "label": ""
@@ -2474,9 +2198,7 @@ def query_document():
     if not answer:
         answer = NOT_FOUND
 
-    page = result.get(
-        "page"
-    )
+    page = result.get("page")
 
     result_type = result.get(
         "type",
@@ -2514,9 +2236,7 @@ def query_document():
     return jsonify({
         "answer": answer,
         "source": {
-            "filename": current_document[
-                "filename"
-            ],
+            "filename": current_document["filename"],
             "page": page,
             "type": result_type,
             "label": label
@@ -2534,10 +2254,7 @@ def query_document():
 )
 def document_status():
 
-    if not current_document[
-        "filename"
-    ]:
-
+    if not current_document["filename"]:
         return jsonify({
             "filename": None,
             "filetype": None,
@@ -2547,26 +2264,16 @@ def document_status():
         })
 
     return jsonify({
-        "filename": current_document[
-            "filename"
-        ],
-        "filetype": current_document[
-            "filetype"
-        ],
+        "filename": current_document["filename"],
+        "filetype": current_document["filetype"],
         "pages": len(
-            current_document[
-                "pages"
-            ]
+            current_document["pages"]
         ),
         "sections": len(
-            current_document[
-                "sections"
-            ]
+            current_document["sections"]
         ),
         "items": len(
-            current_document[
-                "items"
-            ]
+            current_document["items"]
         )
     })
 
@@ -2582,7 +2289,6 @@ def document_status():
 def clear_document():
 
     reset_document()
-
     clear_upload_folder()
 
     return jsonify({
@@ -2615,6 +2321,10 @@ def file_too_large(error):
 
 if __name__ == "__main__":
 
+    is_vercel = bool(
+        os.environ.get("VERCEL")
+    )
+
     app.run(
         host="0.0.0.0",
         port=int(
@@ -2623,5 +2333,5 @@ if __name__ == "__main__":
                 5000
             )
         ),
-        debug=True
+        debug=not is_vercel
     )
