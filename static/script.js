@@ -1,12 +1,12 @@
 /* =========================================================
    RAGenius
    Frontend JavaScript
-   ========================================================= */
+========================================================= */
 
 
 /* =========================================================
    ELEMENTS
-   ========================================================= */
+========================================================= */
 
 const fileInput =
     document.getElementById("fileInput");
@@ -35,14 +35,14 @@ const footerDocumentCount =
 
 /* =========================================================
    DOCUMENT STORAGE
-   ========================================================= */
+========================================================= */
 
 let documents = [];
 
 
 /* =========================================================
    OPEN FILE PICKER
-   ========================================================= */
+========================================================= */
 
 function openFilePicker() {
 
@@ -56,7 +56,7 @@ function openFilePicker() {
 
 /* =========================================================
    FILE SELECTED
-   ========================================================= */
+========================================================= */
 
 if (fileInput) {
 
@@ -66,23 +66,24 @@ if (fileInput) {
 
             if (this.files.length > 0) {
 
-                uploadFile(
-                    this.files[0]
-                );
+                uploadFile(this.files[0]);
 
                 this.value = "";
+
             }
 
         }
     );
+
 }
 
 
 /* =========================================================
    UPLOAD FILE
-   ========================================================= */
+========================================================= */
 
 async function uploadFile(file) {
+
 
     /* Check extension */
 
@@ -123,26 +124,20 @@ async function uploadFile(file) {
 
     /* Clear previous chat */
 
-    if (chatMessages) {
-        chatMessages.innerHTML = "";
-    }
+    chatMessages.innerHTML = "";
 
     showChatWelcome();
 
 
-    /* Show uploading message */
+    /* Show temporary uploading message */
 
     const uploading =
         addMessage(
-            "Uploading " +
-            file.name +
-            "...",
+            "Uploading " + file.name + "...",
             "ai",
             true
         );
 
-
-    /* Prepare form */
 
     const formData =
         new FormData();
@@ -187,9 +182,7 @@ async function uploadFile(file) {
 
         /* Add document */
 
-        addDocument(
-            file.name
-        );
+        addDocument(file.name);
 
 
         /* Show successful upload */
@@ -223,48 +216,47 @@ async function uploadFile(file) {
             ),
             "system"
         );
+
     }
+
 }
 
 
 /* =========================================================
    ADD DOCUMENT
-   ========================================================= */
+========================================================= */
 
 function addDocument(filename) {
 
+
     /* Only one active document */
 
-    documents = [
-        filename
-    ];
+    documents = [filename];
 
 
-    if (documentList) {
-        documentList.innerHTML = "";
-    }
+    documentList.innerHTML = "";
 
 
-    if (emptyDocuments) {
-
-        emptyDocuments.style.display =
-            "none";
-    }
+    emptyDocuments.style.display =
+        "none";
 
 
     const item =
         document.createElement("div");
+
 
     item.className =
         "document-item";
 
 
     item.innerHTML = `
+
         <div class="document-item-icon">
             📄
         </div>
 
-        <div class="document-item-details">
+        <div
+            class="document-item-details">
 
             <div
                 class="document-item-name"
@@ -274,31 +266,29 @@ function addDocument(filename) {
 
             </div>
 
-            <div class="document-item-status">
+            <div
+                class="document-item-status">
 
                 Ready to analyze
 
             </div>
 
         </div>
+
     `;
 
 
-    if (documentList) {
-
-        documentList.prepend(
-            item
-        );
-    }
+    documentList.prepend(item);
 
 
     updateDocumentCount();
+
 }
 
 
 /* =========================================================
    DOCUMENT COUNT
-   ========================================================= */
+========================================================= */
 
 function updateDocumentCount() {
 
@@ -306,24 +296,19 @@ function updateDocumentCount() {
         documents.length;
 
 
-    if (documentCount) {
-
-        documentCount.textContent =
-            count;
-    }
+    documentCount.textContent =
+        count;
 
 
-    if (footerDocumentCount) {
+    footerDocumentCount.textContent =
+        count;
 
-        footerDocumentCount.textContent =
-            count;
-    }
 }
 
 
 /* =========================================================
    HIDE CHAT WELCOME
-   ========================================================= */
+========================================================= */
 
 function hideChatWelcome() {
 
@@ -335,12 +320,13 @@ function hideChatWelcome() {
     chatWelcome.classList.add(
         "hidden"
     );
+
 }
 
 
 /* =========================================================
    SHOW CHAT WELCOME
-   ========================================================= */
+========================================================= */
 
 function showChatWelcome() {
 
@@ -352,14 +338,16 @@ function showChatWelcome() {
     chatWelcome.classList.remove(
         "hidden"
     );
+
 }
 
 
 /* =========================================================
    SEND QUESTION
-   ========================================================= */
+========================================================= */
 
 async function sendQuestion() {
+
 
     if (!questionInput) {
         return;
@@ -379,9 +367,7 @@ async function sendQuestion() {
 
     /* No document */
 
-    if (
-        documents.length === 0
-    ) {
+    if (documents.length === 0) {
 
         hideChatWelcome();
 
@@ -399,7 +385,7 @@ async function sendQuestion() {
     }
 
 
-    /* Hide welcome */
+    /* Hide brain/logo */
 
     hideChatWelcome();
 
@@ -417,7 +403,7 @@ async function sendQuestion() {
     questionInput.value = "";
 
 
-    /* Loading message */
+    /* Add loading box */
 
     const loading =
         addMessage(
@@ -429,14 +415,12 @@ async function sendQuestion() {
 
     try {
 
-        /* =================================================
-           SEND QUESTION TO FLASK
-        ================================================= */
 
         const response =
             await fetch(
                 "/query",
                 {
+
                     method: "POST",
 
                     headers: {
@@ -449,22 +433,26 @@ async function sendQuestion() {
                             question:
                                 question
                         })
+
                 }
             );
 
 
-        /* =================================================
-           CHECK RESPONSE
-        ================================================= */
+        /* The backend always answers with a plain JSON body,
+           even for "not found", so read it as JSON rather
+           than as a token stream. */
 
-        if (
-            !response.ok ||
-            !response.body
-        ) {
+        const data =
+            await response.json();
+
+
+        if (!response.ok) {
 
             throw new Error(
+                data.answer ||
                 "Server could not process the question."
             );
+
         }
 
 
@@ -475,278 +463,27 @@ async function sendQuestion() {
         }
 
 
-        /* =================================================
-           CREATE AI ANSWER BOX
-        ================================================= */
+        /* Create AI answer box */
+
+        const answerText =
+            (data.answer || "").trim() ||
+            "I couldn't find an answer in the currently uploaded document.";
+
 
         const answerMessage =
             addMessage(
-                "",
+                answerText,
                 "ai"
             );
 
 
-        let answerText = "";
+        if (data.source) {
 
-        let buffer = "";
-
-
-        /* =================================================
-           STREAM READER
-        ================================================= */
-
-        const reader =
-            response.body.getReader();
-
-
-        const decoder =
-            new TextDecoder();
-
-
-        /* =================================================
-           READ STREAM
-        ================================================= */
-
-        while (true) {
-
-            const {
-                value,
-                done
-            } =
-                await reader.read();
-
-
-            if (done) {
-                break;
-            }
-
-
-            /* Convert stream to text */
-
-            buffer +=
-                decoder.decode(
-                    value,
-                    {
-                        stream: true
-                    }
+            answerMessage.dataset.source =
+                JSON.stringify(
+                    data.source
                 );
 
-
-            /* Split NDJSON lines */
-
-            const lines =
-                buffer.split("\n");
-
-
-            /* Keep incomplete line */
-
-            buffer =
-                lines.pop();
-
-
-            /* Process complete lines */
-
-            for (
-                const line
-                of lines
-            ) {
-
-                if (
-                    !line.trim()
-                ) {
-                    continue;
-                }
-
-
-                try {
-
-                    const data =
-                        JSON.parse(
-                            line
-                        );
-
-
-                    /* =====================================
-                       SOURCE
-                    ===================================== */
-
-                    if (
-                        data.type ===
-                            "source" &&
-                        data.source
-                    ) {
-
-                        answerMessage.dataset.source =
-                            JSON.stringify(
-                                data.source
-                            );
-                    }
-
-
-                    /* =====================================
-                       AI TOKEN
-                    ===================================== */
-
-                    if (
-                        data.type ===
-                            "token" &&
-                        data.content
-                    ) {
-
-                        answerText +=
-                            data.content;
-
-
-                        answerMessage.textContent =
-                            answerText;
-
-
-                        scrollChatToBottom();
-                    }
-
-
-                    /* =====================================
-                       COMPLETE ANSWER
-                    ===================================== */
-
-                    if (
-                        data.type ===
-                            "answer" &&
-                        data.content
-                    ) {
-
-                        answerText =
-                            data.content;
-
-
-                        answerMessage.textContent =
-                            answerText;
-
-
-                        scrollChatToBottom();
-                    }
-
-
-                    /* =====================================
-                       ERROR
-                    ===================================== */
-
-                    if (
-                        data.type ===
-                            "error"
-                    ) {
-
-                        answerText =
-                            data.message ||
-                            "Something went wrong while generating the answer.";
-
-
-                        answerMessage.textContent =
-                            answerText;
-
-
-                        scrollChatToBottom();
-                    }
-
-
-                } catch (error) {
-
-                    console.error(
-                        "JSON parse error:",
-                        error
-                    );
-                }
-            }
-        }
-
-
-        /* =================================================
-           PROCESS REMAINING BUFFER
-        ================================================= */
-
-        if (
-            buffer.trim()
-        ) {
-
-            try {
-
-                const data =
-                    JSON.parse(
-                        buffer
-                    );
-
-
-                /* Token */
-
-                if (
-                    data.type ===
-                        "token" &&
-                    data.content
-                ) {
-
-                    answerText +=
-                        data.content;
-
-
-                    answerMessage.textContent =
-                        answerText;
-                }
-
-
-                /* Complete answer */
-
-                if (
-                    data.type ===
-                        "answer" &&
-                    data.content
-                ) {
-
-                    answerText =
-                        data.content;
-
-
-                    answerMessage.textContent =
-                        answerText;
-                }
-
-
-                /* Error */
-
-                if (
-                    data.type ===
-                        "error"
-                ) {
-
-                    answerText =
-                        data.message ||
-                        "Something went wrong while generating the answer.";
-
-
-                    answerMessage.textContent =
-                        answerText;
-                }
-
-
-            } catch (error) {
-
-                console.error(
-                    "Final parse error:",
-                    error
-                );
-            }
-        }
-
-
-        /* =================================================
-           NO ANSWER
-        ================================================= */
-
-        if (
-            !answerText.trim()
-        ) {
-
-            answerMessage.textContent =
-                "I couldn't find an answer in the currently uploaded document.";
         }
 
 
@@ -754,6 +491,7 @@ async function sendQuestion() {
 
 
     } catch (error) {
+
 
         console.error(
             "Question error:",
@@ -770,13 +508,15 @@ async function sendQuestion() {
             "Something went wrong while contacting the RAG engine.",
             "system"
         );
+
     }
+
 }
 
 
 /* =========================================================
    ENTER KEY
-   ========================================================= */
+========================================================= */
 
 if (questionInput) {
 
@@ -792,21 +532,25 @@ if (questionInput) {
                 event.preventDefault();
 
                 sendQuestion();
+
             }
+
         }
     );
+
 }
 
 
 /* =========================================================
    ADD MESSAGE
-   ========================================================= */
+========================================================= */
 
 function addMessage(
     text,
     type,
     temporary = false
 ) {
+
 
     const message =
         document.createElement("div");
@@ -817,8 +561,6 @@ function addMessage(
     );
 
 
-    /* User message */
-
     if (
         type === "user"
     ) {
@@ -826,10 +568,8 @@ function addMessage(
         message.classList.add(
             "user-message"
         );
+
     }
-
-
-    /* AI message */
 
     else if (
         type === "ai"
@@ -838,26 +578,24 @@ function addMessage(
         message.classList.add(
             "ai-message"
         );
+
     }
-
-
-    /* System message */
 
     else {
 
         message.classList.add(
             "system-message"
         );
+
     }
 
-
-    /* Temporary loading */
 
     if (temporary) {
 
         message.classList.add(
             "message-loading"
         );
+
     }
 
 
@@ -865,24 +603,22 @@ function addMessage(
         text;
 
 
-    if (chatMessages) {
-
-        chatMessages.appendChild(
-            message
-        );
-    }
+    chatMessages.appendChild(
+        message
+    );
 
 
     scrollChatToBottom();
 
 
     return message;
+
 }
 
 
 /* =========================================================
    SCROLL CHAT
-   ========================================================= */
+========================================================= */
 
 function scrollChatToBottom() {
 
@@ -893,39 +629,34 @@ function scrollChatToBottom() {
 
     chatMessages.scrollTop =
         chatMessages.scrollHeight;
+
 }
 
 
 /* =========================================================
    NEW CONVERSATION
-   ========================================================= */
+========================================================= */
 
 function newConversation() {
 
-    if (chatMessages) {
 
-        chatMessages.innerHTML =
-            "";
-    }
+    chatMessages.innerHTML = "";
 
 
-    if (questionInput) {
-
-        questionInput.value =
-            "";
-    }
+    questionInput.value = "";
 
 
     showChatWelcome();
 
 
     scrollChatToBottom();
+
 }
 
 
 /* =========================================================
    SETTINGS
-   ========================================================= */
+========================================================= */
 
 function showSettings() {
 
@@ -936,12 +667,13 @@ function showSettings() {
         "Settings panel will be available here.",
         "system"
     );
+
 }
 
 
 /* =========================================================
    HELP
-   ========================================================= */
+========================================================= */
 
 function showHelp() {
 
@@ -952,12 +684,13 @@ function showHelp() {
         "Upload a PDF or DOCX file, then ask RAGenius questions about the information inside your document.",
         "system"
     );
+
 }
 
 
 /* =========================================================
    ESCAPE HTML
-   ========================================================= */
+========================================================= */
 
 function escapeHtml(text) {
 
@@ -972,12 +705,13 @@ function escapeHtml(text) {
 
 
     return div.innerHTML;
+
 }
 
 
 /* =========================================================
    INITIAL STATE
-   ========================================================= */
+========================================================= */
 
 updateDocumentCount();
 

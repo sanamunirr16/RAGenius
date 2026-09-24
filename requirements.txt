@@ -1,8 +1,4 @@
 Flask
-gunicorn
-requests
 PyMuPDF
 python-docx
-chromadb
-onnxruntime
-python-dotenv
+gunicorn

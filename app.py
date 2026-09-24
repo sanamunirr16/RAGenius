@@ -1,169 +1,54 @@
+from flask import Flask, render_template, request, jsonify
 import os
 import re
-import json
 import shutil
-import requests
-
-from dotenv import load_dotenv
-from flask import (
-    Flask,
-    render_template,
-    request,
-    jsonify,
-    Response,
-    stream_with_context
-)
-
-import pymupdf
+import fitz
 from docx import Document
-
-import chromadb
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from difflib import SequenceMatcher
 
 
 # ============================================================
-# LOAD ENVIRONMENT VARIABLES
-# ============================================================
-
-load_dotenv()
-
-
-# ============================================================
-# FLASK APP
+# APP
 # ============================================================
 
 app = Flask(__name__)
 
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-CHROMA_FOLDER = os.path.join(BASE_DIR, "chroma_db")
 
-MAX_FILE_SIZE = 10 * 1024 * 1024
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
-MAX_RESULTS = 10
-MAX_CONTEXT_CHUNKS = 4
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+
+# ============================================================
+# CONSTANTS
+# ============================================================
 
 ALLOWED_EXTENSIONS = {"pdf", "docx"}
 
-NO_ANSWER = (
+NOT_FOUND = (
     "I couldn't find this information in the currently uploaded document."
 )
 
 
 # ============================================================
-# OLLAMA CLOUD
+# ONE ACTIVE DOCUMENT ONLY
 # ============================================================
 
-OLLAMA_URL = os.getenv(
-    "OLLAMA_URL",
-    "https://ollama.com/api/generate"
-)
-
-OLLAMA_MODEL = os.getenv(
-    "OLLAMA_MODEL",
-    "gpt-oss:120b"
-)
-
-OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
-
-
-# ============================================================
-# CREATE REQUIRED FOLDERS
-# ============================================================
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(CHROMA_FOLDER, exist_ok=True)
-
-
-# ============================================================
-# CHROMA DATABASE - LAZY LOADING
-# ============================================================
-
-# Important for Render Free:
-# Do NOT load the embedding model while the server is starting.
-# Load it only when a document actually needs to be processed.
-
-chroma_client = chromadb.PersistentClient(
-    path=CHROMA_FOLDER
-)
-
-embedding_function = None
-collection = None
-
-
-def get_embedding_function():
-    """
-    Load Chroma's default embedding function only when needed.
-    """
-
-    global embedding_function
-
-    if embedding_function is None:
-        print("Loading embedding function...")
-
-        embedding_function = DefaultEmbeddingFunction()
-
-        print("Embedding function loaded.")
-
-    return embedding_function
-
-
-def get_collection():
-    """
-    Get the current Chroma collection.
-    Creates it if it does not exist.
-    """
-
-    global collection
-
-    if collection is not None:
-        return collection
-
-    ef = get_embedding_function()
-
-    try:
-        collection = chroma_client.get_collection(
-            name="current_document",
-            embedding_function=ef
-        )
-
-        print("Existing Chroma collection loaded.")
-
-    except Exception:
-
-        collection = chroma_client.create_collection(
-            name="current_document",
-            metadata={
-                "hnsw:space": "cosine"
-            },
-            embedding_function=ef
-        )
-
-        print("New Chroma collection created.")
-
-    return collection
-
-
-# ============================================================
-# FILE HELPERS
-# ============================================================
-
-def allowed_file(filename):
-    """
-    Check whether uploaded file is PDF or DOCX.
-    """
-
-    return (
-        "." in filename
-        and filename.rsplit(".", 1)[1].lower()
-        in ALLOWED_EXTENSIONS
-    )
+current_document = {
+    "filename": None,
+    "filetype": None,
+    "pages": [],
+    "blocks": [],
+    "lines": [],
+    "sections": [],
+    "items": []
+}
 
 
 # ============================================================
@@ -171,77 +56,762 @@ def allowed_file(filename):
 # ============================================================
 
 def clean_text(text):
-    """
-    Clean extracted document text.
-    """
-
-    if not text:
+    if text is None:
         return ""
 
-    text = text.replace("\x00", " ")
+    text = str(text)
+
+    text = text.replace("\xa0", " ")
+    text = text.replace("\u200b", "")
+    text = text.replace("\ufeff", "")
+
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+
+    return text.strip()
+
+
+def normalize_text(text):
+    text = clean_text(text).lower()
+
+    text = text.replace("&", " and ")
+
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+# ============================================================
+# QUESTION PROCESSING
+# ============================================================
+
+QUESTION_PREFIXES = [
+    "what is",
+    "what are",
+    "what was",
+    "what were",
+    "who is",
+    "who are",
+    "who was",
+    "where is",
+    "where are",
+    "when is",
+    "when was",
+    "why is",
+    "why are",
+    "why was",
+    "why were",
+    "how is",
+    "how are",
+    "how does",
+    "how do",
+    "how can",
+    "define",
+    "definition of",
+    "meaning of",
+    "explain",
+    "explain about",
+    "describe",
+    "tell me about",
+    "tell me",
+    "tell about",
+    "give information about",
+    "give information on",
+    "give details about",
+    "give details on",
+    "write about",
+    "discuss",
+    "elaborate on",
+    "elaborate about",
+    "can you explain",
+    "can you tell me about",
+    "briefly explain",
+    "briefly describe"
+]
+
+
+def question_topic(question):
+    """
+    Converts:
+
+        What is machine learning?
+
+    into:
+
+        machine learning
+    """
+
+    text = clean_text(question)
+
+    text = text.rstrip(" ?!:")
+
+    lower = text.lower()
+
+    for prefix in sorted(
+        QUESTION_PREFIXES,
+        key=len,
+        reverse=True
+    ):
+        if lower.startswith(prefix + " "):
+            text = text[len(prefix):].strip()
+            break
+
+        if lower == prefix:
+            text = ""
+            break
+
+    text = text.rstrip(" ?!:")
+
+    return clean_text(text)
+
+
+# ============================================================
+# PREFIX / BULLET CLEANING
+# ============================================================
+
+def remove_number_prefix(text):
+    """
+    Removes:
+
+    1.
+    1.1
+    1.2.3
+    2)
+    """
+
+    return re.sub(
+        r"^\s*\d+(?:\.\d+)*[\.\)]?\s*",
+        "",
+        clean_text(text)
+    ).strip()
+
+
+def remove_letter_prefix(text):
+    """
+    Removes:
+
+    a.
+    b)
+    A.
+    (a)
+    """
+
+    text = clean_text(text)
 
     text = re.sub(
-        r"[ \t]+",
-        " ",
+        r"^\s*\([A-Za-z0-9]+\)\s*",
+        "",
         text
     )
 
     text = re.sub(
-        r"\n\s*\n\s*\n+",
-        "\n\n",
+        r"^\s*[A-Za-z][\.\)]\s*",
+        "",
         text
     )
 
     return text.strip()
 
 
+def remove_bullet_marker(text):
+    text = clean_text(text)
+
+    return re.sub(
+        r"^\s*(?:[-•●▪◦‣*]|[oO])\s+",
+        "",
+        text
+    ).strip()
+
+
+def clean_label(text):
+    text = clean_text(text)
+
+    text = remove_bullet_marker(text)
+    text = remove_number_prefix(text)
+    text = remove_letter_prefix(text)
+
+    return text.strip(" :.-")
+
+
+# ============================================================
+# BULLET DETECTION
+# ============================================================
+
+def is_bullet(text):
+    if not text:
+        return False
+
+    text = clean_text(text)
+
+    return bool(
+        re.match(
+            r"^(?:[-•●▪◦‣*]|[oO])\s+[A-Za-z0-9]",
+            text
+        )
+    )
+
+
+# ============================================================
+# HEADING DETECTION
+# ============================================================
+
+def numbered_heading_info(text):
+    """
+    Returns:
+
+        (True, level)
+
+    for:
+
+        1. Introduction       -> level 1
+        1.1 Definition        -> level 2
+        1.1.1 Example         -> level 3
+        a. Types              -> level 2
+
+    Otherwise:
+
+        (False, None)
+    """
+
+    text = clean_text(text)
+
+    # 1. Introduction
+    match = re.match(
+        r"^\s*(\d+)\.\s+.+",
+        text
+    )
+
+    if match:
+        return True, 1
+
+    # 1.1 Definition
+    match = re.match(
+        r"^\s*(\d+(?:\.\d+)+)\s+.+",
+        text
+    )
+
+    if match:
+        parts = match.group(1).split(".")
+        return True, len(parts)
+
+    # a. Definition
+    if re.match(
+        r"^\s*[A-Za-z][\.\)]\s+.+",
+        text
+    ):
+        return True, 2
+
+    # (a) Definition
+    if re.match(
+        r"^\s*\([A-Za-z0-9]+\)\s+.+",
+        text
+    ):
+        return True, 2
+
+    return False, None
+
+
+def is_all_caps_heading(text):
+    text = clean_text(text)
+
+    if not text:
+        return False
+
+    letters = re.sub(
+        r"[^A-Za-z]",
+        "",
+        text
+    )
+
+    if len(letters) < 4:
+        return False
+
+    upper = sum(
+        1 for char in letters
+        if char.isupper()
+    )
+
+    ratio = upper / len(letters)
+
+    if ratio >= 0.80 and len(text.split()) <= 16:
+        return True
+
+    return False
+
+
+def is_colon_heading(text):
+    """
+    Detects short headings ending with ':'.
+
+    Example:
+
+        Applications:
+        Advantages:
+        Classification:
+    """
+
+    text = clean_text(text)
+
+    if not text.endswith(":"):
+        return False
+
+    left = text[:-1].strip()
+
+    if not left:
+        return False
+
+    if len(left.split()) > 10:
+        return False
+
+    return True
+
+
+def looks_like_title(text):
+    """
+    Generic fallback for headings such as:
+
+        Introduction
+        Applications
+        Machine Learning Algorithms
+        Data Preprocessing
+        Improved Surface Finish and Accuracy
+    """
+
+    text = clean_text(text)
+
+    if not text:
+        return False
+
+    if len(text) > 100:
+        return False
+
+    if is_bullet(text):
+        return False
+
+    if text.endswith("."):
+        return False
+
+    words = text.split()
+
+    if len(words) > 12:
+        return False
+
+    # Avoid ordinary sentence-like paragraphs
+    sentence_words = {
+        "the",
+        "this",
+        "these",
+        "those",
+        "is",
+        "are",
+        "was",
+        "were",
+        "can",
+        "could",
+        "may",
+        "might",
+        "will",
+        "would",
+        "has",
+        "have",
+        "had",
+        "using",
+        "used"
+    }
+
+    lower_words = [
+        re.sub(
+            r"[^a-z]",
+            "",
+            word.lower()
+        )
+        for word in words
+    ]
+
+    sentence_word_count = sum(
+        1
+        for word in lower_words
+        if word in sentence_words
+    )
+
+    if len(words) >= 6 and sentence_word_count >= 2:
+        return False
+
+    # Title case signal
+    title_case_count = 0
+
+    for word in words:
+
+        word_clean = re.sub(
+            r"[^A-Za-z]",
+            "",
+            word
+        )
+
+        if not word_clean:
+            continue
+
+        if word_clean[0].isupper():
+            title_case_count += 1
+
+    title_ratio = (
+        title_case_count /
+        max(len(words), 1)
+    )
+
+    return title_ratio >= 0.60
+
+
+def generic_heading_detection(
+    text,
+    style_name="",
+    bold_ratio=0.0
+):
+    """
+    Generic heading detector.
+
+    It does NOT know anything about NTM,
+    Machine Learning, Big Data, DBMS, etc.
+    """
+
+    text = clean_text(text)
+
+    if not text:
+        return False, None
+
+    style_name = style_name.lower()
+
+    # --------------------------------------------------------
+    # Word heading styles
+    # --------------------------------------------------------
+
+    match = re.search(
+        r"heading\s*(\d+)",
+        style_name
+    )
+
+    if match:
+        return True, int(match.group(1))
+
+    if "title" in style_name:
+        return True, 1
+
+    if "subtitle" in style_name:
+        return True, 2
+
+    # --------------------------------------------------------
+    # Numbered headings
+    # --------------------------------------------------------
+
+    numbered, level = numbered_heading_info(text)
+
+    if numbered:
+        return True, level
+
+    # --------------------------------------------------------
+    # Strong bold short paragraph
+    # --------------------------------------------------------
+
+    if bold_ratio >= 0.75:
+
+        if len(text.split()) <= 15:
+            return True, 2
+
+    # --------------------------------------------------------
+    # ALL CAPS
+    # --------------------------------------------------------
+
+    if is_all_caps_heading(text):
+        return True, 1
+
+    # --------------------------------------------------------
+    # Short colon heading
+    # --------------------------------------------------------
+
+    if is_colon_heading(text):
+        return True, 2
+
+    # --------------------------------------------------------
+    # Title-like heading
+    # --------------------------------------------------------
+
+    if looks_like_title(text):
+        return True, 2
+
+    return False, None
+
+
+# ============================================================
+# INLINE "LABEL: ANSWER"
+# ============================================================
+
+def parse_inline_item(text):
+    """
+    Detects:
+
+        Definition: Machine learning is...
+
+        1. Definition: Machine learning is...
+
+        - Advantages: ...
+    """
+
+    original = clean_text(text)
+
+    if not original:
+        return None
+
+    candidate = remove_bullet_marker(original)
+    candidate = remove_number_prefix(candidate)
+    candidate = remove_letter_prefix(candidate)
+
+    if ":" not in candidate:
+        return None
+
+    left, right = candidate.split(
+        ":",
+        1
+    )
+
+    left = clean_text(left)
+    right = clean_text(right)
+
+    if not left or not right:
+        return None
+
+    # A label should normally be short
+    if len(left.split()) > 12:
+        return None
+
+    return {
+        "label": clean_label(left),
+        "answer": right
+    }
+
+
+# ============================================================
+# DOCX PARAGRAPH INFORMATION
+# ============================================================
+
+def get_docx_style(paragraph):
+    try:
+        return paragraph.style.name or ""
+    except Exception:
+        return ""
+
+
+def get_bold_ratio(paragraph):
+    runs = [
+        run
+        for run in paragraph.runs
+        if clean_text(run.text)
+    ]
+
+    if not runs:
+        return 0.0
+
+    bold_runs = sum(
+        1
+        for run in runs
+        if run.bold is True
+    )
+
+    return bold_runs / len(runs)
+
+
+def get_docx_heading_info(paragraph):
+    text = clean_text(paragraph.text)
+
+    style_name = get_docx_style(
+        paragraph
+    )
+
+    bold_ratio = get_bold_ratio(
+        paragraph
+    )
+
+    return generic_heading_detection(
+        text,
+        style_name,
+        bold_ratio
+    )
+
+
+# ============================================================
+# RESET
+# ============================================================
+
+def reset_document():
+    global current_document
+
+    current_document = {
+        "filename": None,
+        "filetype": None,
+        "pages": [],
+        "blocks": [],
+        "lines": [],
+        "sections": [],
+        "items": []
+    }
+
+
+def clear_upload_folder():
+
+    os.makedirs(
+        UPLOAD_FOLDER,
+        exist_ok=True
+    )
+
+    for name in os.listdir(
+        UPLOAD_FOLDER
+    ):
+
+        path = os.path.join(
+            UPLOAD_FOLDER,
+            name
+        )
+
+        try:
+
+            if os.path.isfile(path):
+                os.remove(path)
+
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+
+        except Exception as error:
+            print(
+                "Could not remove:",
+                path,
+                error
+            )
+
+
 # ============================================================
 # PDF EXTRACTION
 # ============================================================
 
-def extract_pdf(file_path):
-    """
-    Extract text from PDF page by page.
-    """
+def extract_pdf(path):
 
     pages = []
+    blocks = []
+    lines = []
+
+    document = fitz.open(path)
 
     try:
-        pdf = pymupdf.open(file_path)
 
-        for page_number, page in enumerate(pdf, start=1):
+        for page_number, page in enumerate(
+            document,
+            start=1
+        ):
 
-            text = page.get_text("text")
+            page_blocks = page.get_text(
+                "blocks"
+            )
 
-            text = clean_text(text)
+            page_lines = []
 
-            if text:
-                pages.append({
+            for block in page_blocks:
+
+                if len(block) < 5:
+                    continue
+
+                text = clean_text(
+                    block[4]
+                )
+
+                block_type = (
+                    block[6]
+                    if len(block) > 6
+                    else 0
+                )
+
+                # Ignore image blocks
+                if block_type != 0:
+                    continue
+
+                if not text:
+                    continue
+
+                page_lines.append(
+                    text
+                )
+
+                blocks.append({
                     "page": page_number,
                     "text": text
                 })
 
-        pdf.close()
+                # ------------------------------------------------
+                # IMPORTANT:
+                # Preserve ALL lines from PDF blocks.
+                # Do not truncate them.
+                # ------------------------------------------------
 
-    except Exception as e:
-        print("PDF extraction error:", e)
-        raise
+                for one_line in text.split(
+                    "\n"
+                ):
 
-    return pages
+                    one_line = clean_text(
+                        one_line
+                    )
+
+                    if one_line:
+                        lines.append({
+                            "page": page_number,
+                            "text": one_line,
+                            "heading": False,
+                            "heading_level": None
+                        })
+
+            pages.append({
+                "page": page_number,
+                "text": "\n".join(
+                    page_lines
+                )
+            })
+
+    finally:
+        document.close()
+
+    # ------------------------------------------------------------
+    # Generic PDF heading detection
+    # ------------------------------------------------------------
+
+    for line in lines:
+
+        text = line["text"]
+
+        heading, level = (
+            generic_heading_detection(
+                text
+            )
+        )
+
+        line["heading"] = heading
+        line["heading_level"] = level
+
+    return (
+        pages,
+        blocks,
+        lines
+    )
 
 
 # ============================================================
 # DOCX EXTRACTION
 # ============================================================
 
-def extract_docx(file_path):
-    """
-    Extract paragraphs and tables from DOCX.
-    """
+def extract_docx(path):
 
-    document = Document(file_path)
+    pages = []
+    blocks = []
+    lines = []
 
-    parts = []
+    document = Document(path)
 
     # --------------------------------------------------------
     # Paragraphs
@@ -249,10 +819,32 @@ def extract_docx(file_path):
 
     for paragraph in document.paragraphs:
 
-        text = clean_text(paragraph.text)
+        text = clean_text(
+            paragraph.text
+        )
 
-        if text:
-            parts.append(text)
+        if not text:
+            continue
+
+        heading, level = (
+            get_docx_heading_info(
+                paragraph
+            )
+        )
+
+        blocks.append({
+            "page": 1,
+            "text": text,
+            "heading": heading,
+            "heading_level": level
+        })
+
+        lines.append({
+            "page": 1,
+            "text": text,
+            "heading": heading,
+            "heading_level": level
+        })
 
     # --------------------------------------------------------
     # Tables
@@ -266,1157 +858,1302 @@ def extract_docx(file_path):
 
             for cell in row.cells:
 
-                cell_text = clean_text(cell.text)
-
-                if cell_text:
-                    cells.append(cell_text)
-
-            if cells:
-                parts.append(" | ".join(cells))
-
-    full_text = "\n".join(parts)
-
-    full_text = clean_text(full_text)
-
-    if not full_text:
-        return []
-
-    return [
-        {
-            "page": 0,
-            "text": full_text
-        }
-    ]
-
-
-# ============================================================
-# DOCUMENT EXTRACTION
-# ============================================================
-
-def extract_document(file_path):
-    """
-    Extract text according to file type.
-    """
-
-    extension = file_path.rsplit(".", 1)[1].lower()
-
-    if extension == "pdf":
-        return extract_pdf(file_path)
-
-    if extension == "docx":
-        return extract_docx(file_path)
-
-    raise ValueError("Unsupported file type.")
-
-
-# ============================================================
-# HEADING DETECTION
-# ============================================================
-
-HEADING_KEYWORDS = [
-    "introduction",
-    "definition",
-    "overview",
-    "background",
-    "objectives",
-    "objective",
-    "scope",
-    "importance",
-    "applications",
-    "advantages",
-    "disadvantages",
-    "limitations",
-    "conclusion",
-    "future scope",
-    "summary",
-    "classification",
-    "architecture",
-    "components",
-    "types",
-    "characteristics",
-    "features",
-    "functions",
-    "main functions",
-    "working",
-    "methodology",
-    "system architecture",
-    "parallel hardware",
-    "parallel software",
-    "distributed memory",
-    "interconnection networks",
-    "vector processors",
-    "graphics processing units",
-    "mimd systems",
-    "simd systems"
-]
-
-
-def normalize_for_comparison(text):
-    """
-    Normalize text for heading comparison.
-    """
-
-    text = text.lower()
-
-    text = re.sub(
-        r"^\s*\d+(?:\.\d+)*[\s\.\-:]*",
-        "",
-        text
-    )
-
-    text = re.sub(
-        r"[^a-z0-9\s]",
-        " ",
-        text
-    )
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
-    return text.strip()
-
-
-def is_heading(text):
-    """
-    Try to identify document headings.
-    """
-
-    if not text:
-        return False
-
-    text = text.strip()
-
-    if len(text) > 160:
-        return False
-
-    normalized = normalize_for_comparison(text)
-
-    if not normalized:
-        return False
-
-    # Numbered headings such as:
-    # 2.6 Main gateway functions
-    # 3 Scope
-    if re.match(
-        r"^\s*\d+(?:\.\d+)*[\s\.\-:]",
-        text
-    ):
-        return True
-
-    # Exact keyword headings
-    for keyword in HEADING_KEYWORDS:
-
-        if normalized == keyword:
-            return True
-
-        if normalized.startswith(keyword + " "):
-            return True
-
-    # Short all-uppercase headings
-    if len(text.split()) <= 10 and text.isupper():
-        return True
-
-    return False
-
-
-# ============================================================
-# CHUNKING
-# ============================================================
-
-def split_words(text, chunk_size=300, overlap=60):
-    """
-    Split text into overlapping word chunks.
-    """
-
-    words = text.split()
-
-    if not words:
-        return []
-
-    chunks = []
-
-    start = 0
-
-    while start < len(words):
-
-        end = min(
-            start + chunk_size,
-            len(words)
-        )
-
-        chunk = " ".join(words[start:end])
-
-        if chunk.strip():
-            chunks.append(chunk.strip())
-
-        if end >= len(words):
-            break
-
-        start = max(
-            end - overlap,
-            start + 1
-        )
-
-    return chunks
-
-
-def create_chunks(pages):
-    """
-    Create heading-aware chunks.
-    """
-
-    chunks = []
-
-    current_heading = ""
-    current_text = []
-    current_page = 0
-
-    def save_current():
-
-        nonlocal current_text
-
-        if not current_text:
-            return
-
-        text = "\n".join(current_text)
-
-        text = clean_text(text)
-
-        if not text:
-            current_text = []
-            return
-
-        # Keep heading together with its content
-        if current_heading:
-
-            final_text = (
-                current_heading
-                + "\n"
-                + text
-            )
-
-        else:
-
-            final_text = text
-
-        # Small sections can stay together
-        word_count = len(final_text.split())
-
-        if word_count <= 450:
-
-            chunks.append({
-                "text": final_text,
-                "page": current_page,
-                "heading": current_heading
-            })
-
-        else:
-
-            smaller_chunks = split_words(
-                final_text,
-                chunk_size=300,
-                overlap=60
-            )
-
-            for smaller in smaller_chunks:
-
-                chunks.append({
-                    "text": smaller,
-                    "page": current_page,
-                    "heading": current_heading
-                })
-
-        current_text = []
-
-    # --------------------------------------------------------
-    # Process pages
-    # --------------------------------------------------------
-
-    for page_data in pages:
-
-        page_number = page_data["page"]
-
-        lines = page_data["text"].splitlines()
-
-        for line in lines:
-
-            line = clean_text(line)
-
-            if not line:
-                continue
-
-            if is_heading(line):
-
-                save_current()
-
-                current_heading = line
-                current_page = page_number
-
-            else:
-
-                if current_page == 0:
-                    current_page = page_number
-
-                current_text.append(line)
-
-    save_current()
-
-    # --------------------------------------------------------
-    # Fallback if no chunks
-    # --------------------------------------------------------
-
-    if not chunks:
-
-        complete_text = "\n".join(
-            page["text"]
-            for page in pages
-        )
-
-        for part in split_words(
-            complete_text,
-            chunk_size=300,
-            overlap=60
-        ):
-
-            chunks.append({
-                "text": part,
-                "page": 0,
-                "heading": ""
-            })
-
-    return chunks
-
-
-# ============================================================
-# RESET DOCUMENT STORAGE
-# ============================================================
-
-def reset_document_storage():
-    """
-    Remove the old document and create a fresh collection.
-    """
-
-    global collection
-
-    print("Resetting document storage...")
-
-    # --------------------------------------------------------
-    # Delete uploaded files
-    # --------------------------------------------------------
-
-    if os.path.exists(UPLOAD_FOLDER):
-
-        for filename in os.listdir(UPLOAD_FOLDER):
-
-            file_path = os.path.join(
-                UPLOAD_FOLDER,
-                filename
-            )
-
-            try:
-
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-
-            except Exception as e:
-                print(
-                    "Could not delete:",
-                    file_path,
-                    e
+                cell_text = clean_text(
+                    cell.text
                 )
 
-    # --------------------------------------------------------
-    # Delete old Chroma collection
-    # --------------------------------------------------------
-
-    try:
-
-        chroma_client.delete_collection(
-            name="current_document"
-        )
-
-        print("Old Chroma collection deleted.")
-
-    except Exception as e:
-
-        print(
-            "No old Chroma collection to delete:",
-            e
-        )
-
-    # Important:
-    # Remove old Python reference too.
-
-    collection = None
-
-    # --------------------------------------------------------
-    # Create fresh collection
-    # --------------------------------------------------------
-
-    collection = chroma_client.create_collection(
-        name="current_document",
-        metadata={
-            "hnsw:space": "cosine"
-        },
-        embedding_function=get_embedding_function()
-    )
-
-    print("Fresh Chroma collection created.")
-
-    return collection
-
-
-# ============================================================
-# IMPORTANT WORDS
-# ============================================================
-
-STOPWORDS = {
-    "a",
-    "an",
-    "the",
-    "is",
-    "are",
-    "was",
-    "were",
-    "what",
-    "which",
-    "who",
-    "when",
-    "where",
-    "why",
-    "how",
-    "does",
-    "do",
-    "did",
-    "can",
-    "could",
-    "would",
-    "should",
-    "will",
-    "about",
-    "for",
-    "from",
-    "with",
-    "and",
-    "or",
-    "of",
-    "to",
-    "in",
-    "on",
-    "by",
-    "as",
-    "at",
-    "it",
-    "this",
-    "that",
-    "these",
-    "those",
-    "be",
-    "been",
-    "being",
-    "main"
-}
-
-
-def important_words(question):
-    """
-    Extract meaningful words from a question.
-    """
-
-    words = re.findall(
-        r"[a-zA-Z0-9]+",
-        question.lower()
-    )
-
-    return [
-        word
-        for word in words
-        if word not in STOPWORDS
-        and len(word) > 1
-    ]
-
-
-# ============================================================
-# KEYWORD SCORE
-# ============================================================
-
-def keyword_score(question, text):
-    """
-    Calculate keyword overlap score.
-    """
-
-    q_words = important_words(question)
-
-    if not q_words:
-        return 0.0
-
-    text_lower = text.lower()
-
-    matched = 0
-
-    for word in q_words:
-
-        if word in text_lower:
-            matched += 1
-
-    return matched / len(q_words)
-
-
-# ============================================================
-# PHRASE SCORE
-# ============================================================
-
-def phrase_score(question, text):
-    """
-    Check exact phrase overlap.
-    """
-
-    q = clean_text(question).lower()
-    t = text.lower()
-
-    if not q:
-        return 0.0
-
-    if q in t:
-        return 1.0
-
-    words = important_words(question)
-
-    if len(words) < 2:
-        return 0.0
-
-    phrases = []
-
-    for i in range(len(words) - 1):
-
-        phrases.append(
-            words[i] + " " + words[i + 1]
-        )
-
-    matched = sum(
-        1
-        for phrase in phrases
-        if phrase in t
-    )
-
-    return matched / len(phrases)
-
-
-# ============================================================
-# COVERAGE SCORE
-# ============================================================
-
-def coverage_score(question, text):
-    """
-    Measure how many important question words
-    appear in the retrieved text.
-    """
-
-    words = important_words(question)
-
-    if not words:
-        return 0.0
-
-    text_lower = text.lower()
-
-    matched = sum(
-        1
-        for word in words
-        if word in text_lower
-    )
-
-    return matched / len(words)
-
-
-# ============================================================
-# HEADING SCORE
-# ============================================================
-
-def heading_score(question, heading):
-    """
-    Give higher score when the question terms
-    match the section heading.
-    """
-
-    if not heading:
-        return 0.0
-
-    return keyword_score(
-        question,
-        heading
-    )
-
-
-# ============================================================
-# RETRIEVAL
-# ============================================================
-
-def retrieve_chunks(question):
-    """
-    Hybrid retrieval:
-    semantic similarity + keyword + phrase + coverage + heading.
-    """
-
-    current_collection = get_collection()
-
-    if current_collection.count() == 0:
-        return []
-
-    # --------------------------------------------------------
-    # Query variations
-    # --------------------------------------------------------
-
-    q_variations = []
-
-    original_question = clean_text(question)
-
-    if original_question:
-        q_variations.append(
-            original_question
-        )
-
-    words = important_words(question)
-
-    if words:
-
-        cleaned_question = " ".join(words)
-
-        if cleaned_question not in q_variations:
-            q_variations.append(
-                cleaned_question
+                if cell_text:
+                    cells.append(
+                        cell_text
+                    )
+
+            if not cells:
+                continue
+
+            row_text = " | ".join(
+                cells
             )
 
-    # --------------------------------------------------------
-    # Semantic search
-    # --------------------------------------------------------
+            blocks.append({
+                "page": 1,
+                "text": row_text,
+                "heading": False,
+                "heading_level": None
+            })
 
-    semantic_candidates = {}
+            lines.append({
+                "page": 1,
+                "text": row_text,
+                "heading": False,
+                "heading_level": None
+            })
 
-    for query in q_variations:
+    pages.append({
+        "page": 1,
+        "text": "\n".join(
+            line["text"]
+            for line in lines
+        )
+    })
 
-        try:
+    return (
+        pages,
+        blocks,
+        lines
+    )
 
-            results = current_collection.query(
-                query_texts=[query],
-                n_results=min(
-                    MAX_RESULTS,
-                    current_collection.count()
+
+# ============================================================
+# BUILD HIERARCHICAL SECTIONS
+# ============================================================
+
+def build_sections(lines):
+
+    sections = []
+
+    stack = []
+
+    current_section = None
+
+    for index, line in enumerate(
+        lines
+    ):
+
+        text = clean_text(
+            line.get("text", "")
+        )
+
+        if not text:
+            continue
+
+        is_heading = line.get(
+            "heading",
+            False
+        )
+
+        level = line.get(
+            "heading_level"
+        )
+
+        # ----------------------------------------------------
+        # HEADING
+        # ----------------------------------------------------
+
+        if is_heading:
+
+            if level is None:
+                level = 2
+
+            # Save old section
+            if current_section:
+
+                answer = clean_text(
+                    "\n".join(
+                        current_section[
+                            "content"
+                        ]
+                    )
+                )
+
+                current_section[
+                    "answer"
+                ] = answer
+
+                if answer:
+                    sections.append(
+                        current_section
+                    )
+
+            # Remove deeper hierarchy
+            while stack and stack[-1][
+                "level"
+            ] >= level:
+                stack.pop()
+
+            parent = (
+                stack[-1]
+                if stack
+                else None
+            )
+
+            section = {
+                "label": clean_label(
+                    text
                 ),
-                include=[
-                    "documents",
-                    "metadatas",
-                    "distances"
-                ]
+                "raw_label": text,
+                "level": level,
+                "page": line.get(
+                    "page",
+                    1
+                ),
+                "line_index": index,
+                "content": [],
+                "answer": "",
+                "parent": (
+                    parent["label"]
+                    if parent
+                    else ""
+                )
+            }
+
+            stack.append(
+                section
             )
 
-        except Exception as e:
-
-            print(
-                "Chroma query error:",
-                e
-            )
+            current_section = section
 
             continue
 
-        documents = results.get(
-            "documents",
-            [[]]
-        )[0]
+        # ----------------------------------------------------
+        # NORMAL CONTENT
+        # ----------------------------------------------------
 
-        metadatas = results.get(
-            "metadatas",
-            [[]]
-        )[0]
+        if current_section is None:
 
-        distances = results.get(
-            "distances",
-            [[]]
-        )[0]
+            # Document text before first heading
+            current_section = {
+                "label": "",
+                "raw_label": "",
+                "level": 99,
+                "page": line.get(
+                    "page",
+                    1
+                ),
+                "line_index": index,
+                "content": [],
+                "answer": "",
+                "parent": ""
+            }
 
-        for i, document in enumerate(documents):
+        current_section[
+            "content"
+        ].append(text)
 
-            metadata = (
-                metadatas[i]
-                if i < len(metadatas)
-                else {}
+    # Save final section
+    if current_section:
+
+        answer = clean_text(
+            "\n".join(
+                current_section[
+                    "content"
+                ]
+            )
+        )
+
+        current_section[
+            "answer"
+        ] = answer
+
+        if answer:
+            sections.append(
+                current_section
             )
 
-            distance = (
-                distances[i]
-                if i < len(distances)
-                else 1.0
+    return sections
+
+
+# ============================================================
+# BUILD SEARCH ITEMS
+# ============================================================
+
+def build_items(lines):
+
+    items = []
+
+    current_heading = ""
+    current_level = 99
+    current_parent = ""
+
+    pending = None
+
+    def save_pending():
+
+        nonlocal pending
+
+        if not pending:
+            return
+
+        answer = clean_text(
+            " ".join(
+                pending["parts"]
+            )
+        )
+
+        if answer:
+
+            items.append({
+                "label": pending[
+                    "label"
+                ],
+                "answer": answer,
+                "page": pending[
+                    "page"
+                ],
+                "line_index": pending[
+                    "line_index"
+                ],
+                "heading": current_heading,
+                "heading_level": current_level,
+                "parent": current_parent
+            })
+
+        pending = None
+
+    for index, line in enumerate(
+        lines
+    ):
+
+        text = clean_text(
+            line.get("text", "")
+        )
+
+        if not text:
+            continue
+
+        # ----------------------------------------------------
+        # NEW HEADING
+        # ----------------------------------------------------
+
+        if line.get(
+            "heading",
+            False
+        ):
+
+            save_pending()
+
+            current_heading = clean_label(
+                text
             )
 
-            key = document
+            current_level = line.get(
+                "heading_level",
+                2
+            )
 
-            if key not in semantic_candidates:
+            # Find nearest previous parent heading
+            current_parent = ""
 
-                semantic_candidates[key] = {
-                    "text": document,
-                    "metadata": metadata,
-                    "distance": distance
+            for previous in reversed(
+                items
+            ):
+
+                previous_heading = clean_text(
+                    previous.get(
+                        "heading",
+                        ""
+                    )
+                )
+
+                previous_level = previous.get(
+                    "heading_level",
+                    99
+                )
+
+                if (
+                    previous_heading
+                    and previous_level
+                    < current_level
+                ):
+
+                    current_parent = (
+                        previous_heading
+                    )
+
+                    break
+
+            continue
+
+        # ----------------------------------------------------
+        # BULLET
+        # ----------------------------------------------------
+
+        if is_bullet(text):
+
+            save_pending()
+
+            cleaned = remove_bullet_marker(
+                text
+            )
+
+            inline = parse_inline_item(
+                cleaned
+            )
+
+            if inline:
+
+                pending = {
+                    "label": inline[
+                        "label"
+                    ],
+                    "parts": [
+                        inline[
+                            "answer"
+                        ]
+                    ],
+                    "page": line.get(
+                        "page",
+                        1
+                    ),
+                    "line_index": index
                 }
 
             else:
 
-                semantic_candidates[key]["distance"] = min(
-                    semantic_candidates[key]["distance"],
-                    distance
-                )
+                pending = {
+                    "label": "",
+                    "parts": [cleaned],
+                    "page": line.get(
+                        "page",
+                        1
+                    ),
+                    "line_index": index
+                }
 
-    # --------------------------------------------------------
-    # Lexical scan
-    #
-    # This is useful for exact headings such as:
-    # "Main gateway functions"
-    # --------------------------------------------------------
+            continue
 
-    try:
+        # ----------------------------------------------------
+        # INLINE LABEL: ANSWER
+        # ----------------------------------------------------
 
-        all_data = current_collection.get(
-            include=[
-                "documents",
-                "metadatas"
-            ]
+        inline = parse_inline_item(
+            text
         )
 
-        all_documents = all_data.get(
-            "documents",
-            []
-        )
+        if inline:
 
-        all_metadatas = all_data.get(
-            "metadatas",
-            []
-        )
+            save_pending()
 
-        # Avoid processing an unnecessarily huge number
-        # of documents.
+            pending = {
+                "label": inline[
+                    "label"
+                ],
+                "parts": [
+                    inline[
+                        "answer"
+                    ]
+                ],
+                "page": line.get(
+                    "page",
+                    1
+                ),
+                "line_index": index
+            }
 
-        for i, document in enumerate(
-            all_documents
-        ):
+            continue
 
-            metadata = (
-                all_metadatas[i]
-                if i < len(all_metadatas)
-                else {}
-            )
+        # ----------------------------------------------------
+        # CONTINUATION
+        # ----------------------------------------------------
 
-            if document not in semantic_candidates:
+        if pending:
 
-                ks = keyword_score(
-                    question,
-                    document
-                )
+            pending[
+                "parts"
+            ].append(text)
 
-                ps = phrase_score(
-                    question,
-                    document
-                )
+        else:
 
-                if ks > 0 or ps > 0:
+            # Normal paragraph
+            items.append({
+                "label": "",
+                "answer": text,
+                "page": line.get(
+                    "page",
+                    1
+                ),
+                "line_index": index,
+                "heading": current_heading,
+                "heading_level": current_level,
+                "parent": current_parent
+            })
 
-                    semantic_candidates[document] = {
-                        "text": document,
-                        "metadata": metadata,
-                        "distance": 1.0
-                    }
+    save_pending()
 
-    except Exception as e:
-
-        print(
-            "Lexical scan error:",
-            e
-        )
-
-    # --------------------------------------------------------
-    # Score candidates
-    # --------------------------------------------------------
-
-    scored = []
-
-    for item in semantic_candidates.values():
-
-        text = item["text"]
-
-        metadata = item.get(
-            "metadata",
-            {}
-        )
-
-        distance = item.get(
-            "distance",
-            1.0
-        )
-
-        # Convert cosine distance into similarity-like score
-
-        semantic_score = max(
-            0.0,
-            min(
-                1.0,
-                1.0 - distance
+    return [
+        item
+        for item in items
+        if clean_text(
+            item.get(
+                "answer",
+                ""
             )
         )
+    ]
 
-        ks = keyword_score(
-            question,
-            text
-        )
 
-        ps = phrase_score(
-            question,
-            text
-        )
+# ============================================================
+# ADD SECTION ITEMS
+# ============================================================
 
-        cs = coverage_score(
-            question,
-            text
-        )
+def add_section_items(
+    items,
+    sections
+):
+    """
+    Creates searchable entries for complete
+    document sections.
 
-        hs = heading_score(
-            question,
-            metadata.get(
-                "heading",
+    This is generic and works for any subject.
+    """
+
+    result = list(items)
+
+    for section in sections:
+
+        label = clean_text(
+            section.get(
+                "label",
                 ""
             )
         )
 
-        final_score = (
-            semantic_score * 0.45
-            + ks * 0.20
-            + ps * 0.15
-            + cs * 0.10
-            + hs * 0.10
+        answer = clean_text(
+            section.get(
+                "answer",
+                ""
+            )
         )
 
-        scored.append({
-            "text": text,
-            "metadata": metadata,
-            "score": final_score,
-            "semantic_score": semantic_score,
-            "keyword_score": ks,
-            "phrase_score": ps,
-            "coverage_score": cs,
-            "heading_score": hs
-        })
+        if not label or not answer:
+            continue
+
+        normalized = normalize_text(
+            label
+        )
+
+        # Find same label + same parent
+        found = False
+
+        for item in result:
+
+            item_label = normalize_text(
+                item.get(
+                    "label",
+                    ""
+                )
+            )
+
+            item_parent = normalize_text(
+                item.get(
+                    "parent",
+                    ""
+                )
+            )
+
+            section_parent = normalize_text(
+                section.get(
+                    "parent",
+                    ""
+                )
+            )
+
+            if (
+                item_label == normalized
+                and item_parent
+                == section_parent
+            ):
+
+                # Keep the more complete answer
+                if len(answer) > len(
+                    clean_text(
+                        item.get(
+                            "answer",
+                            ""
+                        )
+                    )
+                ):
+
+                    item["answer"] = answer
+
+                found = True
+                break
+
+        if not found:
+
+            result.append({
+                "label": label,
+                "answer": answer,
+                "page": section.get(
+                    "page",
+                    1
+                ),
+                "line_index": section.get(
+                    "line_index",
+                    0
+                ),
+                "heading": label,
+                "heading_level": section.get(
+                    "level",
+                    2
+                ),
+                "parent": section.get(
+                    "parent",
+                    ""
+                )
+            })
+
+    return result
+
+
+# ============================================================
+# TOKENIZATION
+# ============================================================
+
+STOP_WORDS = {
+    "what",
+    "is",
+    "are",
+    "was",
+    "were",
+    "the",
+    "a",
+    "an",
+    "of",
+    "to",
+    "for",
+    "in",
+    "on",
+    "at",
+    "and",
+    "or",
+    "with",
+    "about",
+    "does",
+    "do",
+    "can",
+    "could",
+    "would",
+    "should",
+    "please",
+    "me",
+    "tell",
+    "give",
+    "explain",
+    "define",
+    "describe",
+    "write",
+    "discuss"
+}
+
+
+def tokens(text):
+
+    words = normalize_text(
+        text
+    ).split()
+
+    return {
+        word
+        for word in words
+        if (
+            word not in STOP_WORDS
+            and len(word) > 1
+        )
+    }
+
+
+def similarity(a, b):
+
+    a = normalize_text(a)
+    b = normalize_text(b)
+
+    if not a or not b:
+        return 0.0
+
+    return SequenceMatcher(
+        None,
+        a,
+        b
+    ).ratio()
+
+
+def overlap_score(a, b):
+
+    a_tokens = tokens(a)
+    b_tokens = tokens(b)
+
+    if not a_tokens:
+        return 0.0
+
+    return len(
+        a_tokens & b_tokens
+    ) / len(a_tokens)
+
+
+def exact_match(a, b):
+
+    return (
+        normalize_text(a)
+        ==
+        normalize_text(b)
+    )
+
+
+# ============================================================
+# FIND EXACT HEADING
+# ============================================================
+
+def find_exact_heading(question):
+
+    topic = question_topic(
+        question
+    )
+
+    if not topic:
+        return None
+
+    matches = []
+
+    for item in current_document[
+        "items"
+    ]:
+
+        label = clean_text(
+            item.get(
+                "label",
+                ""
+            )
+        )
+
+        answer = clean_text(
+            item.get(
+                "answer",
+                ""
+            )
+        )
+
+        if not label or not answer:
+            continue
+
+        if exact_match(
+            topic,
+            label
+        ):
+
+            matches.append(
+                item
+            )
+
+    if not matches:
+        return None
 
     # --------------------------------------------------------
-    # Sort
+    # If duplicate labels exist, prefer the one with:
+    #
+    # 1. More specific hierarchy
+    # 2. Longer complete answer
+    #
+    # This is still entirely document-based.
     # --------------------------------------------------------
 
-    scored.sort(
+    matches.sort(
+        key=lambda item: (
+            item.get(
+                "heading_level",
+                99
+            ),
+            -len(
+                clean_text(
+                    item.get(
+                        "answer",
+                        ""
+                    )
+                )
+            )
+        )
+    )
+
+    best = matches[0]
+
+    return {
+        "type": "exact_heading",
+        "score": 1000,
+        "page": best.get(
+            "page",
+            1
+        ),
+        "label": best.get(
+            "label",
+            ""
+        ),
+        "answer": best.get(
+            "answer",
+            ""
+        ),
+        "line_index": best.get(
+            "line_index",
+            0
+        )
+    }
+
+
+# ============================================================
+# FIND STRONG CONTAINMENT
+# ============================================================
+
+def find_heading_contains(question):
+
+    topic = question_topic(
+        question
+    )
+
+    if not topic:
+        return None
+
+    topic_norm = normalize_text(
+        topic
+    )
+
+    candidates = []
+
+    for item in current_document[
+        "items"
+    ]:
+
+        label = clean_text(
+            item.get(
+                "label",
+                ""
+            )
+        )
+
+        answer = clean_text(
+            item.get(
+                "answer",
+                ""
+            )
+        )
+
+        if not label or not answer:
+            continue
+
+        label_norm = normalize_text(
+            label
+        )
+
+        if (
+            topic_norm in label_norm
+            or label_norm in topic_norm
+        ):
+
+            candidates.append(
+                item
+            )
+
+    if not candidates:
+        return None
+
+    # Require meaningful containment
+    candidates.sort(
+        key=lambda item: (
+            len(
+                normalize_text(
+                    item.get(
+                        "label",
+                        ""
+                    )
+                )
+            ),
+            -len(
+                item.get(
+                    "answer",
+                    ""
+                )
+            )
+        )
+    )
+
+    best = candidates[0]
+
+    return {
+        "type": "heading_contains",
+        "score": 900,
+        "page": best.get(
+            "page",
+            1
+        ),
+        "label": best.get(
+            "label",
+            ""
+        ),
+        "answer": best.get(
+            "answer",
+            ""
+        ),
+        "line_index": best.get(
+            "line_index",
+            0
+        )
+    }
+
+
+# ============================================================
+# FUZZY HEADING
+# ============================================================
+
+def find_similar_heading(question):
+
+    topic = question_topic(
+        question
+    )
+
+    if not topic:
+        return None
+
+    candidates = []
+
+    for item in current_document[
+        "items"
+    ]:
+
+        label = clean_text(
+            item.get(
+                "label",
+                ""
+            )
+        )
+
+        answer = clean_text(
+            item.get(
+                "answer",
+                ""
+            )
+        )
+
+        if not label or not answer:
+            continue
+
+        sim = similarity(
+            topic,
+            label
+        )
+
+        overlap = overlap_score(
+            topic,
+            label
+        )
+
+        if (
+            sim >= 0.90
+            and overlap >= 0.65
+        ):
+
+            score = (
+                sim * 100
+                +
+                overlap * 50
+            )
+
+            candidates.append({
+                "score": score,
+                "item": item
+            })
+
+    if not candidates:
+        return None
+
+    candidates.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    return scored[:MAX_RESULTS]
+    # --------------------------------------------------------
+    # Important:
+    # If two candidates are almost equally good,
+    # DO NOT GUESS.
+    # --------------------------------------------------------
+
+    if len(candidates) > 1:
+
+        difference = (
+            candidates[0]["score"]
+            -
+            candidates[1]["score"]
+        )
+
+        if difference < 4:
+            return None
+
+    best = candidates[0]["item"]
+
+    return {
+        "type": "similar_heading",
+        "score": candidates[0][
+            "score"
+        ],
+        "page": best.get(
+            "page",
+            1
+        ),
+        "label": best.get(
+            "label",
+            ""
+        ),
+        "answer": best.get(
+            "answer",
+            ""
+        ),
+        "line_index": best.get(
+            "line_index",
+            0
+        )
+    }
 
 
 # ============================================================
-# EXACT SECTION PRIORITY
+# LEXICAL RETRIEVAL
 # ============================================================
 
-def select_context(question, retrieved):
-    """
-    Select the best chunks for the LLM.
-    """
+def lexical_search(question):
 
-    if not retrieved:
-        return []
-
-    q_normalized = normalize_for_comparison(
+    topic = question_topic(
         question
     )
 
-    # --------------------------------------------------------
-    # First check for exact heading matches
-    # --------------------------------------------------------
+    if not topic:
+        return None
 
-    exact_heading_matches = []
-
-    question_words = set(
-        important_words(question)
+    query_tokens = tokens(
+        topic
     )
 
-    for item in retrieved:
+    if not query_tokens:
+        return None
 
-        heading = item["metadata"].get(
-            "heading",
-            ""
+    candidates = []
+
+    for item in current_document[
+        "items"
+    ]:
+
+        label = clean_text(
+            item.get(
+                "label",
+                ""
+            )
         )
 
-        if not heading:
+        answer = clean_text(
+            item.get(
+                "answer",
+                ""
+            )
+        )
+
+        if not answer:
             continue
 
-        heading_words = set(
-            important_words(heading)
+        label_tokens = tokens(
+            label
         )
 
-        if not heading_words:
-            continue
-
-        overlap = len(
-            question_words
-            & heading_words
+        answer_tokens = tokens(
+            answer
         )
 
-        # Strong heading match
-        if overlap >= 1:
+        label_overlap = 0
 
-            exact_heading_matches.append(
-                (
-                    overlap,
-                    item
+        answer_overlap = 0
+
+        if query_tokens:
+
+            label_overlap = (
+                len(
+                    query_tokens
+                    &
+                    label_tokens
                 )
+                /
+                len(query_tokens)
             )
 
-    exact_heading_matches.sort(
-        key=lambda x: (
-            x[0],
-            x[1]["score"]
-        ),
+            answer_overlap = (
+                len(
+                    query_tokens
+                    &
+                    answer_tokens
+                )
+                /
+                len(query_tokens)
+            )
+
+        # Label match is much stronger
+        score = (
+            label_overlap * 100
+            +
+            answer_overlap * 30
+        )
+
+        if normalize_text(
+            topic
+        ) in normalize_text(
+            label
+        ):
+            score += 100
+
+        if score > 0:
+
+            candidates.append({
+                "score": score,
+                "item": item
+            })
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda x: x["score"],
         reverse=True
     )
 
-    selected = []
+    best_score = candidates[0][
+        "score"
+    ]
 
     # --------------------------------------------------------
-    # Add best heading match first
+    # Strict confidence check
     # --------------------------------------------------------
 
-    for _, item in exact_heading_matches:
+    if best_score < 55:
+        return None
 
-        if item not in selected:
+    # Avoid random answer when candidates are too close
+    if len(candidates) > 1:
 
-            selected.append(item)
+        second_score = candidates[1][
+            "score"
+        ]
 
-        if len(selected) >= MAX_CONTEXT_CHUNKS:
-            break
+        if (
+            best_score - second_score
+            < 8
+        ):
+            return None
 
-    # --------------------------------------------------------
-    # Add remaining high scoring chunks
-    # --------------------------------------------------------
+    best = candidates[0]["item"]
 
-    for item in retrieved:
-
-        if item not in selected:
-
-            selected.append(item)
-
-        if len(selected) >= MAX_CONTEXT_CHUNKS:
-            break
-
-    return selected
-
-
-# ============================================================
-# BUILD PROMPT
-# ============================================================
-
-def build_prompt(question, context_chunks):
-    """
-    Build a strict document-only prompt.
-    """
-
-    context_parts = []
-
-    for index, item in enumerate(
-        context_chunks,
-        start=1
-    ):
-
-        metadata = item.get(
-            "metadata",
-            {}
-        )
-
-        heading = metadata.get(
-            "heading",
-            ""
-        )
-
-        page = metadata.get(
+    return {
+        "type": "lexical",
+        "score": best_score,
+        "page": best.get(
             "page",
+            1
+        ),
+        "label": best.get(
+            "label",
+            ""
+        ),
+        "answer": best.get(
+            "answer",
+            ""
+        ),
+        "line_index": best.get(
+            "line_index",
             0
         )
+    }
 
-        text = item.get(
-            "text",
-            ""
-        )
 
-        if heading:
+# ============================================================
+# SECTION RETRIEVAL
+# ============================================================
 
-            source_header = (
-                f"Section: {heading}"
-            )
+def retrieve_matching_section(
+    question
+):
 
-        else:
-
-            source_header = "Section: Unknown"
-
-        if page:
-
-            source_header += (
-                f" | Page: {page}"
-            )
-
-        context_parts.append(
-            f"[Document section {index}]\n"
-            f"{source_header}\n"
-            f"{text}"
-        )
-
-    context = "\n\n".join(
-        context_parts
+    topic = question_topic(
+        question
     )
 
-    prompt = f"""
-You are answering a question about an uploaded document.
+    if not topic:
+        return None
 
-IMPORTANT RULES:
+    candidates = []
 
-1. Use ONLY the information provided in the document context below.
-2. Do NOT use outside knowledge.
-3. Do NOT guess.
-4. If the answer is not supported by the document context, respond exactly:
-I couldn't find this information in the currently uploaded document.
-5. Keep the answer simple and easy to understand.
-6. If the document gives numbered points, preserve those points.
-7. Do not add information that is not present in the document.
-8. Answer the question directly.
+    for section in current_document[
+        "sections"
+    ]:
 
-DOCUMENT CONTEXT:
-{context}
-
-QUESTION:
-{question}
-
-ANSWER:
-"""
-
-    return prompt
-
-
-# ============================================================
-# OLLAMA STREAM
-# ============================================================
-
-def ollama_stream(prompt):
-    """
-    Stream answer from Ollama Cloud.
-    """
-
-    if not OLLAMA_API_KEY:
-
-        yield {
-            "type": "error",
-            "message": "OLLAMA_API_KEY is not configured."
-        }
-
-        return
-
-    headers = {
-        "Authorization": (
-            f"Bearer {OLLAMA_API_KEY}"
-        ),
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": True,
-        "temperature": 0.0
-    }
-
-    try:
-
-        response = requests.post(
-            OLLAMA_URL,
-            headers=headers,
-            json=payload,
-            stream=True,
-            timeout=180
+        label = clean_text(
+            section.get(
+                "label",
+                ""
+            )
         )
 
-        response.raise_for_status()
+        answer = clean_text(
+            section.get(
+                "answer",
+                ""
+            )
+        )
 
-        for line in response.iter_lines(
-            decode_unicode=True
+        if not label or not answer:
+            continue
+
+        sim = similarity(
+            topic,
+            label
+        )
+
+        overlap = overlap_score(
+            topic,
+            label
+        )
+
+        if (
+            sim >= 0.90
+            and overlap >= 0.65
         ):
 
-            if not line:
-                continue
+            score = (
+                sim * 80
+                +
+                overlap * 50
+            )
 
-            try:
+            candidates.append({
+                "score": score,
+                "section": section
+            })
 
-                data = json.loads(line)
+    if not candidates:
+        return None
 
-            except json.JSONDecodeError:
+    candidates.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
 
-                continue
+    if len(candidates) > 1:
 
-            if "response" in data:
+        if (
+            candidates[0]["score"]
+            -
+            candidates[1]["score"]
+            < 5
+        ):
+            return None
 
-                yield {
-                    "type": "token",
-                    "text": data["response"]
-                }
+    best = candidates[0]["section"]
 
-            if data.get("done"):
-
-                yield {
-                    "type": "done"
-                }
-
-    except requests.exceptions.Timeout:
-
-        yield {
-            "type": "error",
-            "message": "The AI request timed out. Please try again."
-        }
-
-    except requests.exceptions.RequestException as e:
-
-        print(
-            "Ollama request error:",
-            e
+    return {
+        "type": "section",
+        "score": candidates[0][
+            "score"
+        ],
+        "page": best.get(
+            "page",
+            1
+        ),
+        "label": best.get(
+            "label",
+            ""
+        ),
+        "answer": best.get(
+            "answer",
+            ""
+        ),
+        "line_index": best.get(
+            "line_index",
+            0
         )
-
-        yield {
-            "type": "error",
-            "message": "Could not connect to Ollama Cloud."
-        }
-
-    except Exception as e:
-
-        print(
-            "Ollama error:",
-            e
-        )
-
-        yield {
-            "type": "error",
-            "message": "An unexpected error occurred."
-        }
+    }
 
 
 # ============================================================
-# HOME PAGE
+# MAIN RETRIEVAL
+# ============================================================
+
+def retrieve_answer(question):
+
+    if not current_document[
+        "filename"
+    ]:
+
+        return {
+            "type": "none",
+            "score": 0,
+            "page": None,
+            "label": "",
+            "answer": NOT_FOUND
+        }
+
+    # --------------------------------------------------------
+    # 1. Exact heading
+    # --------------------------------------------------------
+
+    result = find_exact_heading(
+        question
+    )
+
+    if result:
+        return result
+
+    # --------------------------------------------------------
+    # 2. Strong heading containment
+    # --------------------------------------------------------
+
+    result = find_heading_contains(
+        question
+    )
+
+    if result:
+        return result
+
+    # --------------------------------------------------------
+    # 3. High confidence fuzzy heading
+    # --------------------------------------------------------
+
+    result = find_similar_heading(
+        question
+    )
+
+    if result:
+        return result
+
+    # --------------------------------------------------------
+    # 4. Strong lexical search
+    # --------------------------------------------------------
+
+    result = lexical_search(
+        question
+    )
+
+    if result:
+        return result
+
+    # --------------------------------------------------------
+    # 5. Section search
+    # --------------------------------------------------------
+
+    result = retrieve_matching_section(
+        question
+    )
+
+    if result:
+        return result
+
+    # --------------------------------------------------------
+    # 6. NOT FOUND
+    # --------------------------------------------------------
+
+    return {
+        "type": "none",
+        "score": 0,
+        "page": None,
+        "label": "",
+        "answer": NOT_FOUND
+    }
+
+
+# ============================================================
+# HOME
 # ============================================================
 
 @app.route("/")
 def home():
-
     return render_template(
         "landing.html"
     )
@@ -1428,7 +2165,6 @@ def home():
 
 @app.route("/dashboard")
 def dashboard():
-
     return render_template(
         "index.html"
     )
@@ -1444,213 +2180,215 @@ def dashboard():
 )
 def upload_file():
 
-    global collection
+    global current_document
+
+    file = request.files.get(
+        "file"
+    )
+
+    if file is None:
+
+        file = request.files.get(
+            "document"
+        )
+
+    if not file or not file.filename:
+
+        return jsonify({
+            "success": False,
+            "message": "No file selected."
+        }), 400
+
+    filename = os.path.basename(
+        file.filename
+    )
+
+    extension = ""
+
+    if "." in filename:
+
+        extension = (
+            filename
+            .rsplit(
+                ".",
+                1
+            )[1]
+            .lower()
+        )
+
+    if extension not in ALLOWED_EXTENSIONS:
+
+        return jsonify({
+            "success": False,
+            "message": (
+                "Only PDF and DOCX files are supported."
+            )
+        }), 400
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # COMPLETELY REMOVE OLD DOCUMENT
+    # --------------------------------------------------------
+
+    reset_document()
+
+    clear_upload_folder()
+
+    # --------------------------------------------------------
+    # SAFE FILE NAME
+    # --------------------------------------------------------
+
+    safe_filename = re.sub(
+        r"[^A-Za-z0-9_.-]",
+        "_",
+        filename
+    )
+
+    filepath = os.path.join(
+        UPLOAD_FOLDER,
+        safe_filename
+    )
 
     try:
 
-        # ----------------------------------------------------
-        # Check file
-        # ----------------------------------------------------
-
-        if "file" not in request.files:
-
-            return jsonify({
-                "success": False,
-                "error": "No file uploaded."
-            }), 400
-
-        file = request.files["file"]
-
-        if not file.filename:
-
-            return jsonify({
-                "success": False,
-                "error": "No file selected."
-            }), 400
-
-        if not allowed_file(
-            file.filename
-        ):
-
-            return jsonify({
-                "success": False,
-                "error": "Only PDF and DOCX files are allowed."
-            }), 400
-
-        # ----------------------------------------------------
-        # Check size before processing
-        # ----------------------------------------------------
-
-        file.seek(
-            0,
-            os.SEEK_END
-        )
-
-        file_size = file.tell()
-
-        file.seek(0)
-
-        if file_size > MAX_FILE_SIZE:
-
-            return jsonify({
-                "success": False,
-                "error": "File size must be 10 MB or less."
-            }), 400
-
-        if file_size == 0:
-
-            return jsonify({
-                "success": False,
-                "error": "The uploaded file is empty."
-            }), 400
-
-        # ----------------------------------------------------
-        # Reset old document
-        # ----------------------------------------------------
-
-        reset_document_storage()
-
-        # ----------------------------------------------------
-        # Save new file
-        # ----------------------------------------------------
-
-        filename = os.path.basename(
-            file.filename
-        )
-
-        file_path = os.path.join(
-            UPLOAD_FOLDER,
-            filename
-        )
-
-        file.save(file_path)
-
-        print(
-            "Uploaded file:",
-            filename
+        file.save(
+            filepath
         )
 
         # ----------------------------------------------------
-        # Extract text
+        # EXTRACT
         # ----------------------------------------------------
 
-        pages = extract_document(
-            file_path
-        )
+        if extension == "pdf":
 
-        if not pages:
-
-            return jsonify({
-                "success": False,
-                "error": "Could not extract text from the document."
-            }), 400
-
-        # ----------------------------------------------------
-        # Create chunks
-        # ----------------------------------------------------
-
-        chunks = create_chunks(
-            pages
-        )
-
-        if not chunks:
-
-            return jsonify({
-                "success": False,
-                "error": "No readable text was found in the document."
-            }), 400
-
-        print(
-            "Created chunks:",
-            len(chunks)
-        )
-
-        # ----------------------------------------------------
-        # Get current collection
-        # ----------------------------------------------------
-
-        current_collection = get_collection()
-
-        # ----------------------------------------------------
-        # Add chunks in batches
-        #
-        # This helps reduce peak memory usage on Render Free.
-        # ----------------------------------------------------
-
-        batch_size = 16
-
-        for start in range(
-            0,
-            len(chunks),
-            batch_size
-        ):
-
-            batch = chunks[
-                start:start + batch_size
-            ]
-
-            ids = [
-                f"chunk_{i}"
-                for i in range(
-                    start,
-                    start + len(batch)
+            pages, blocks, lines = (
+                extract_pdf(
+                    filepath
                 )
-            ]
-
-            documents = [
-                item["text"]
-                for item in batch
-            ]
-
-            metadatas = []
-
-            for item in batch:
-
-                metadatas.append({
-                    "page": int(
-                        item.get(
-                            "page",
-                            0
-                        )
-                    ),
-                    "heading": item.get(
-                        "heading",
-                        ""
-                    )
-                })
-
-            current_collection.add(
-                ids=ids,
-                documents=documents,
-                metadatas=metadatas
             )
+
+        else:
+
+            pages, blocks, lines = (
+                extract_docx(
+                    filepath
+                )
+            )
+
+        # ----------------------------------------------------
+        # BUILD DOCUMENT STRUCTURE
+        # ----------------------------------------------------
+
+        sections = build_sections(
+            lines
+        )
+
+        items = build_items(
+            lines
+        )
+
+        items = add_section_items(
+            items,
+            sections
+        )
+
+        # ----------------------------------------------------
+        # STORE ONLY THIS DOCUMENT
+        # ----------------------------------------------------
+
+        current_document = {
+            "filename": filename,
+            "filetype": extension,
+            "pages": pages,
+            "blocks": blocks,
+            "lines": lines,
+            "sections": sections,
+            "items": items
+        }
+
+        # ----------------------------------------------------
+        # DEBUG INFORMATION
+        # ----------------------------------------------------
+
+        print("\n================================")
+        print("NEW DOCUMENT LOADED")
+        print("================================")
+        print(
+            "Filename:",
+            filename
+        )
+        print(
+            "Type:",
+            extension
+        )
+        print(
+            "Pages:",
+            len(pages)
+        )
+        print(
+            "Lines:",
+            len(lines)
+        )
+        print(
+            "Sections:",
+            len(sections)
+        )
+        print(
+            "Items:",
+            len(items)
+        )
+
+        print("\nDETECTED SECTIONS:")
+
+        for section in sections:
 
             print(
-                f"Indexed {min(start + batch_size, len(chunks))}"
-                f"/{len(chunks)} chunks"
+                f"  LEVEL {section.get('level')}: "
+                f"{section.get('label')}"
             )
 
         print(
-            "Document indexing completed."
+            "================================\n"
         )
 
         return jsonify({
             "success": True,
+            "message": (
+                "Document uploaded successfully."
+            ),
             "filename": filename,
-            "chunks": len(chunks),
-            "message": "Document uploaded successfully."
+            "filetype": extension,
+            "pages": len(pages),
+            "sections": len(sections),
+            "items": len(items)
         })
 
-    except Exception as e:
+    except Exception as error:
 
         print(
-            "Upload error:",
-            repr(e)
+            "DOCUMENT PROCESSING ERROR:",
+            error
         )
+
+        reset_document()
+
+        try:
+
+            if os.path.exists(
+                filepath
+            ):
+                os.remove(
+                    filepath
+                )
+
+        except Exception:
+            pass
 
         return jsonify({
             "success": False,
-            "error": str(e)
+            "message": (
+                "Could not process the document."
+            )
         }), 500
 
 
@@ -1662,286 +2400,213 @@ def upload_file():
     "/query",
     methods=["POST"]
 )
-def query():
+def query_document():
 
-    try:
-
-        data = request.get_json(
-            silent=True
-        )
-
-        if not data:
-
-            return jsonify({
-                "success": False,
-                "error": "Invalid request."
-            }), 400
-
-        question = clean_text(
-            data.get(
-                "question",
-                ""
-            )
-        )
-
-        if not question:
-
-            return jsonify({
-                "success": False,
-                "error": "Please enter a question."
-            }), 400
-
-        # ----------------------------------------------------
-        # Check document
-        # ----------------------------------------------------
-
-        current_collection = get_collection()
-
-        if current_collection.count() == 0:
-
-            return Response(
-                json.dumps({
-                    "type": "done",
-                    "answer": NO_ANSWER
-                }) + "\n",
-                mimetype="application/x-ndjson"
-            )
-
-        # ----------------------------------------------------
-        # Retrieve
-        # ----------------------------------------------------
-
-        retrieved = retrieve_chunks(
-            question
-        )
-
-        if not retrieved:
-
-            return Response(
-                json.dumps({
-                    "type": "done",
-                    "answer": NO_ANSWER
-                }) + "\n",
-                mimetype="application/x-ndjson"
-            )
-
-        # ----------------------------------------------------
-        # Select context
-        # ----------------------------------------------------
-
-        context_chunks = select_context(
-            question,
-            retrieved
-        )
-
-        if not context_chunks:
-
-            return Response(
-                json.dumps({
-                    "type": "done",
-                    "answer": NO_ANSWER
-                }) + "\n",
-                mimetype="application/x-ndjson"
-            )
-
-        # ----------------------------------------------------
-        # Minimum relevance check
-        # ----------------------------------------------------
-
-        best_score = max(
-            item["score"]
-            for item in context_chunks
-        )
-
-        best_keyword = max(
-            item["keyword_score"]
-            for item in context_chunks
-        )
-
-        best_phrase = max(
-            item["phrase_score"]
-            for item in context_chunks
-        )
-
-        # If retrieval has almost no connection
-        # with the question, do not ask the LLM
-        # to guess.
-
-        if (
-            best_score < 0.20
-            and best_keyword == 0
-            and best_phrase == 0
-        ):
-
-            return Response(
-                json.dumps({
-                    "type": "done",
-                    "answer": NO_ANSWER
-                }) + "\n",
-                mimetype="application/x-ndjson"
-            )
-
-        # ----------------------------------------------------
-        # Build prompt
-        # ----------------------------------------------------
-
-        prompt = build_prompt(
-            question,
-            context_chunks
-        )
-
-        # ----------------------------------------------------
-        # Stream response
-        # ----------------------------------------------------
-
-        def generate():
-
-            full_answer = ""
-
-            for item in ollama_stream(
-                prompt
-            ):
-
-                if item["type"] == "token":
-
-                    full_answer += item["text"]
-
-                    yield (
-                        json.dumps(item)
-                        + "\n"
-                    )
-
-                elif item["type"] == "error":
-
-                    yield (
-                        json.dumps(item)
-                        + "\n"
-                    )
-
-                    return
-
-                elif item["type"] == "done":
-
-                    # ----------------------------------------
-                    # Safety check
-                    # ----------------------------------------
-
-                    cleaned_answer = (
-                        full_answer.strip()
-                    )
-
-                    # If the model produced an empty answer
-                    if not cleaned_answer:
-
-                        yield (
-                            json.dumps({
-                                "type": "token",
-                                "text": NO_ANSWER
-                            })
-                            + "\n"
-                        )
-
-                    # ----------------------------------------
-                    # Send source information
-                    # ----------------------------------------
-
-                    sources = []
-
-                    for item2 in context_chunks:
-
-                        metadata = item2.get(
-                            "metadata",
-                            {}
-                        )
-
-                        source = {
-                            "page": metadata.get(
-                                "page",
-                                0
-                            ),
-                            "heading": metadata.get(
-                                "heading",
-                                ""
-                            )
-                        }
-
-                        if source not in sources:
-                            sources.append(
-                                source
-                            )
-
-                    yield (
-                        json.dumps({
-                            "type": "sources",
-                            "sources": sources
-                        })
-                        + "\n"
-                    )
-
-                    yield (
-                        json.dumps({
-                            "type": "done"
-                        })
-                        + "\n"
-                    )
-
-        return Response(
-            stream_with_context(
-                generate()
-            ),
-            mimetype="application/x-ndjson"
-        )
-
-    except Exception as e:
-
-        print(
-            "Query error:",
-            repr(e)
-        )
-
-        def error_stream():
-
-            yield (
-                json.dumps({
-                    "type": "error",
-                    "message": "An error occurred while processing your question."
-                })
-                + "\n"
-            )
-
-        return Response(
-            stream_with_context(
-                error_stream()
-            ),
-            mimetype="application/x-ndjson"
-        )
-
-
-# ============================================================
-# HEALTH CHECK
-# ============================================================
-
-@app.route("/health")
-def health():
-
-    try:
-
-        current_collection = get_collection()
-
-        count = current_collection.count()
+    if not current_document[
+        "filename"
+    ]:
 
         return jsonify({
-            "status": "ok",
-            "document_loaded": count > 0,
-            "chunks": count
+            "answer": NOT_FOUND,
+            "source": {
+                "filename": None,
+                "page": None,
+                "type": "none",
+                "label": ""
+            }
         })
 
-    except Exception as e:
+    data = request.get_json(
+        silent=True
+    )
+
+    if not data:
 
         return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
+            "answer": NOT_FOUND,
+            "source": {
+                "filename": current_document[
+                    "filename"
+                ],
+                "page": None,
+                "type": "none",
+                "label": ""
+            }
+        })
+
+    question = clean_text(
+        data.get(
+            "question",
+            ""
+        )
+    )
+
+    if not question:
+
+        return jsonify({
+            "answer": NOT_FOUND,
+            "source": {
+                "filename": current_document[
+                    "filename"
+                ],
+                "page": None,
+                "type": "none",
+                "label": ""
+            }
+        })
+
+    print(
+        "\nQUESTION:",
+        question
+    )
+
+    result = retrieve_answer(
+        question
+    )
+
+    answer = clean_text(
+        result.get(
+            "answer",
+            NOT_FOUND
+        )
+    )
+
+    if not answer:
+        answer = NOT_FOUND
+
+    page = result.get(
+        "page"
+    )
+
+    result_type = result.get(
+        "type",
+        "none"
+    )
+
+    label = result.get(
+        "label",
+        ""
+    )
+
+    print(
+        "MATCH:",
+        label
+    )
+
+    print(
+        "TYPE:",
+        result_type
+    )
+
+    print(
+        "SCORE:",
+        result.get(
+            "score",
+            0
+        )
+    )
+
+    print(
+        "ANSWER:",
+        answer
+    )
+
+    return jsonify({
+        "answer": answer,
+        "source": {
+            "filename": current_document[
+                "filename"
+            ],
+            "page": page,
+            "type": result_type,
+            "label": label
+        }
+    })
+
+
+# ============================================================
+# CURRENT DOCUMENT STATUS
+# ============================================================
+
+@app.route(
+    "/document",
+    methods=["GET"]
+)
+def document_status():
+
+    if not current_document[
+        "filename"
+    ]:
+
+        return jsonify({
+            "filename": None,
+            "filetype": None,
+            "pages": 0,
+            "sections": 0,
+            "items": 0
+        })
+
+    return jsonify({
+        "filename": current_document[
+            "filename"
+        ],
+        "filetype": current_document[
+            "filetype"
+        ],
+        "pages": len(
+            current_document[
+                "pages"
+            ]
+        ),
+        "sections": len(
+            current_document[
+                "sections"
+            ]
+        ),
+        "items": len(
+            current_document[
+                "items"
+            ]
+        )
+    })
+
+
+# ============================================================
+# CLEAR DOCUMENT
+# ============================================================
+
+@app.route(
+    "/clear",
+    methods=["POST"]
+)
+def clear_document():
+
+    reset_document()
+
+    clear_upload_folder()
+
+    return jsonify({
+        "success": True,
+        "message": (
+            "Current document removed."
+        )
+    })
+
+
+# ============================================================
+# FILE TOO LARGE
+# ============================================================
+
+@app.errorhandler(413)
+def file_too_large(error):
+
+    return jsonify({
+        "success": False,
+        "message": (
+            "File is too large. "
+            "Maximum size is 10 MB."
+        )
+    }), 413
 
 
 # ============================================================
@@ -1950,15 +2615,13 @@ def health():
 
 if __name__ == "__main__":
 
-    port = int(
-        os.environ.get(
-            "PORT",
-            5000
-        )
-    )
-
     app.run(
         host="0.0.0.0",
-        port=port,
-        debug=False
+        port=int(
+            os.environ.get(
+                "PORT",
+                5000
+            )
+        ),
+        debug=True
     )
